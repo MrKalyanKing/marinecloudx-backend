@@ -1,0 +1,61 @@
+{
+  "name": "marinecloudx-backend",
+  "version": "0.0.1",
+  "private": true,
+  "description": "SMIVORA / MarineCloudeX REST API — NestJS + TypeORM. The only app that talks to PostgreSQL.",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "tsc-watch -p tsconfig.build.json --onSuccess \"node --env-file=.env dist/main.js\"",
+    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "start:prod": "node dist/main.js",
+    "lint": "eslint \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test": "echo \"backend: no tests yet\" && exit 0",
+    "migration:generate": "tsx ./node_modules/typeorm/cli.js migration:generate -d ./src/database/data-source.ts",
+    "migration:run": "tsx ./node_modules/typeorm/cli.js migration:run -d ./src/database/data-source.ts",
+    "migration:revert": "tsx ./node_modules/typeorm/cli.js migration:revert -d ./src/database/data-source.ts",
+    "schema:log": "tsx ./node_modules/typeorm/cli.js schema:log -d ./src/database/data-source.ts",
+    "migration:show": "tsx ./node_modules/typeorm/cli.js migration:show -d ./src/database/data-source.ts",
+    "seed": "tsx src/database/seeds/run.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1123.0",
+    "@nestjs/common": "^12.0.1",
+    "@nestjs/config": "^12.0.0",
+    "@nestjs/core": "^12.0.1",
+    "@nestjs/mapped-types": "^12.0.0",
+    "@nestjs/platform-express": "^12.0.1",
+    "@nestjs/swagger": "^12.0.1",
+    "@nestjs/typeorm": "^12.0.1",
+    "bcryptjs": "^3.0.3",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.4.2",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "sharp": "^0.35.4",
+    "swagger-ui-express": "^5.0.1",
+    "typeorm": "^1.1.1",
+    "uuid": "^14.0.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22",
+    "eslint": "^9",
+    "rimraf": "^6",
+    "tsc-watch": "^7.2.1",
+    "tsx": "^4",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8"
+  }
+}
