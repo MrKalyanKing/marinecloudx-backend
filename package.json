@@ -2,12 +2,13 @@
   "name": "marinecloudx-backend",
   "version": "0.0.1",
   "private": true,
-  "description": "SMIVORA / MarineCloudeX REST API — NestJS + TypeORM. The only app that talks to PostgreSQL.",
+  "description": "MarineCloudeX REST API — NestJS + TypeORM. The only app that talks to PostgreSQL.",
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
     "dev": "tsc-watch -p tsconfig.build.json --onSuccess \"node --env-file=.env dist/main.js\"",
+    "start:dev": "npm run dev",
     "build": "rimraf dist && tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "start:prod": "node dist/main.js",
