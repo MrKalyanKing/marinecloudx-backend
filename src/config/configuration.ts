@@ -1,3 +1,5 @@
+import { resolveSentryDsn } from "./sentry.config";
+
 /**
  * Typed application configuration, loaded once from the environment.
  *
@@ -35,6 +37,12 @@ export interface AppConfig {
     bucket: string | null;
     publicUrl: string | null;
   };
+  sentry: {
+    dsn: string | null;
+    environment: string;
+    tracesSampleRate: number;
+    enabled: boolean;
+  };
   revalidation: {
     secret: string | null;
     frontendUrl: string | null;
@@ -50,12 +58,19 @@ function list(value: string | undefined): string[] {
 
 export function configuration(): AppConfig {
   const env = (process.env.NODE_ENV ?? "development") as AppConfig["app"]["env"];
+  const sentryDsn = resolveSentryDsn();
 
   return {
     app: {
       env,
       port: Number(process.env.PORT ?? 3001),
       corsOrigins: list(process.env.CORS_ORIGINS) || [],
+    },
+    sentry: {
+      dsn: sentryDsn,
+      environment: env,
+      tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? (env === "production" ? 0.2 : 1.0)),
+      enabled: Boolean(sentryDsn) && (env === "production" || process.env.SENTRY_ENABLE_DEV === "true"),
     },
     database: {
       url: process.env.DATABASE_URL ?? "",

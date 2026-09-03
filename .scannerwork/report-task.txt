@@ -1,0 +1,6 @@
+projectKey=marinecloudx-backend
+serverUrl=https://sonarqube.marinecloudx.in
+serverVersion=26.8.0.126808
+dashboardUrl=https://sonarqube.marinecloudx.in/dashboard?id=marinecloudx-backend
+ceTaskId=f9e873de-4f7e-4cd3-a63f-e9fc879b8f60
+ceTaskUrl=https://sonarqube.marinecloudx.in/api/ce/task?id=f9e873de-4f7e-4cd3-a63f-e9fc879b8f60

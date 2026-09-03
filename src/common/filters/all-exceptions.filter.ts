@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Logger,
 } from "@nestjs/common";
+import * as Sentry from "@sentry/node";
 
 import type { ApiErrorCode, ApiErrorResponse, ApiFieldError } from "../../contracts";
 
@@ -20,6 +21,9 @@ import type { ApiErrorCode, ApiErrorResponse, ApiFieldError } from "../../contra
  * name, driver message or connection detail. 5xx and non-HTTP throws are logged
  * in full, server-side only. Expected 4xx are not logged as errors (normal
  * traffic), matching the legacy `handleApiRoute` behaviour.
+ *
+ * All 5xx and unexpected internal exceptions are reported to Sentry with
+ * contextual tags, request metadata, and authenticated user info.
  */
 
 const STATUS_TO_CODE: Partial<Record<number, ApiErrorCode>> = {
@@ -50,6 +54,27 @@ interface Resolved {
   internal?: unknown;
 }
 
+const SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "x-auth-token",
+  "x-api-key",
+]);
+
+function sanitizeHeaders(headers?: Record<string, unknown>): Record<string, string> {
+  if (!headers) return {};
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (SENSITIVE_HEADERS.has(key.toLowerCase())) {
+      clean[key] = "[REDACTED]";
+    } else if (typeof value === "string") {
+      clean[key] = value;
+    }
+  }
+  return clean;
+}
+
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger("Exception");
@@ -60,7 +85,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
       status(code: number): { json(body: unknown): void };
       setHeader(name: string, value: string): void;
     }>();
-    const req = http.getRequest<{ method?: string; url?: string; requestId?: string }>();
+    const req = http.getRequest<{
+      method?: string;
+      url?: string;
+      requestId?: string;
+      query?: Record<string, unknown>;
+      headers?: Record<string, unknown>;
+      user?: { id?: string; email?: string; role?: string };
+    }>();
 
     const resolved = this.resolve(exception);
 
@@ -77,6 +109,50 @@ export class AllExceptionsFilter implements ExceptionFilter {
         `${req.method ?? "?"} ${req.url ?? "?"} [${req.requestId ?? "-"}] -> ${resolved.status}`,
         resolved.internal instanceof Error ? resolved.internal.stack : String(resolved.internal),
       );
+
+      // Report unhandled 5xx errors to Sentry
+      Sentry.withScope((scope) => {
+        scope.setTag("status_code", String(resolved.status));
+        scope.setTag("error_code", resolved.code);
+        if (req.requestId) {
+          scope.setTag("request_id", req.requestId);
+        }
+        if (req.method) {
+          scope.setTag("http.method", req.method);
+        }
+        if (req.url) {
+          scope.setTag("http.url", req.url);
+        }
+
+        if (req.user?.id || req.user?.email) {
+          scope.setUser({
+            id: req.user.id,
+            email: req.user.email,
+            segment: req.user.role,
+          });
+        }
+
+        scope.setContext("request", {
+          method: req.method,
+          url: req.url,
+          requestId: req.requestId,
+          query: req.query,
+          headers: sanitizeHeaders(req.headers),
+        });
+
+        const errorToCapture =
+          resolved.internal instanceof Error
+            ? resolved.internal
+            : exception instanceof Error
+              ? exception
+              : new Error(
+                  typeof resolved.internal === "string"
+                    ? resolved.internal
+                    : resolved.message || "Internal Server Error",
+                );
+
+        Sentry.captureException(errorToCapture);
+      });
     }
 
     const body: ApiErrorResponse = {
