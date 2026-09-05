@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsc-watch -p tsconfig.build.json --onSuccess \"node --env-file=.env dist/main.js\"",
     "start:dev": "npm run dev",
-    "build": "rimraf dist && tsc -p tsconfig.build.json",
+    "build": "rimraf dist && tsc -p tsconfig.build.json && node -e \"require('fs').copyFileSync('package.json', 'dist/package.json'); require('fs').copyFileSync('package-lock.json', 'dist/package-lock.json')\"",
     "start": "node dist/main.js",
     "start:prod": "node dist/main.js",
     "lint": "eslint \"src/**/*.ts\"",
