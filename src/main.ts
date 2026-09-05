@@ -33,8 +33,8 @@ async function bootstrap(): Promise<void> {
 
   app.use(
     helmet({
-      // Relax CSP so swagger-ui can load its scripts and styles in non-production
-      contentSecurityPolicy: appCfg.env === "production" ? undefined : false,
+      // Relax CSP so swagger-ui can load its scripts and styles
+      contentSecurityPolicy: false,
     }),
   );
   app.use(cookieParser());
@@ -60,19 +60,15 @@ async function bootstrap(): Promise<void> {
     isDbConnected = false;
   }
 
-  // Mount Swagger in non-production environments
-  if (appCfg.env !== "production") {
-    setupSwagger(app, appCfg.port);
-  }
+  // Mount Swagger in both dev and prod
+  setupSwagger(app, appCfg.port);
 
   await app.listen(appCfg.port);
 
   // Startup Console Output
   console.log("");
   console.log(`🗄️  DB connected: ${isDbConnected ? "yes" : "no"}`);
-  if (appCfg.env !== "production") {
-    console.log(`📄 Swagger doc available on http://localhost:${appCfg.port}/api/docs`);
-  }
+  console.log(`📄 Swagger doc available on http://localhost:${appCfg.port}/api/docs`);
   console.log(`🚀 Backend listening on http://localhost:${appCfg.port} (env: ${appCfg.env})`);
   console.log("");
 }

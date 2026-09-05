@@ -63,7 +63,7 @@ export function configuration(): AppConfig {
   return {
     app: {
       env,
-      port: Number(process.env.PORT ?? 3001),
+      port: Number(process.env.PORT ?? (env === "production" ? 3000 : 3001)),
       corsOrigins: list(process.env.CORS_ORIGINS) || [],
     },
     sentry: {
