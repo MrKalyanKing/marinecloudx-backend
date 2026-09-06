@@ -17,10 +17,14 @@
     "test": "echo \"backend: no tests yet\" && exit 0",
     "migration:generate": "tsx ./node_modules/typeorm/cli.js migration:generate -d ./src/database/data-source.ts",
     "migration:run": "tsx ./node_modules/typeorm/cli.js migration:run -d ./src/database/data-source.ts",
+    "migration:run:prod": "node ./node_modules/typeorm/cli.js migration:run -d ./dist/database/data-source.js",
     "migration:revert": "tsx ./node_modules/typeorm/cli.js migration:revert -d ./src/database/data-source.ts",
+    "migration:revert:prod": "node ./node_modules/typeorm/cli.js migration:revert -d ./dist/database/data-source.js",
     "schema:log": "tsx ./node_modules/typeorm/cli.js schema:log -d ./src/database/data-source.ts",
     "migration:show": "tsx ./node_modules/typeorm/cli.js migration:show -d ./src/database/data-source.ts",
-    "seed": "tsx src/database/seeds/run.ts"
+    "migration:show:prod": "node ./node_modules/typeorm/cli.js migration:show -d ./dist/database/data-source.js",
+    "seed": "tsx src/database/seeds/run.ts",
+    "seed:prod": "node dist/database/seeds/run.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1123.0",

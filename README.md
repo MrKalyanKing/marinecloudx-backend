@@ -11,6 +11,8 @@ npm install
 npm run dev        # http://localhost:3001  (GET / and GET /health return the envelope)
 ```
 
+For production deployment troubleshooting (PostgreSQL permissions, schema creation, migrations, and seeds), see [PRODUCTION_TROUBLESHOOTING.md](./PRODUCTION_TROUBLESHOOTING.md).
+
 Self-contained: own `package.json`, lockfile, tsconfig and lint config. Nothing
 imports from outside this folder. The shared wire contract is a committed copy at
 `src/contracts/` (regenerated from the repo root with `npm run sync:contracts`).
