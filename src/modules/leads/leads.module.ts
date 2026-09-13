@@ -1,6 +1,8 @@
 import { Module } from "@nestjs/common";
 import { TypeOrmModule } from "@nestjs/typeorm";
 
+import { MailModule } from "../mail/mail.module";
+
 import {
   ContactEntity,
   IndustryEntity,
@@ -29,6 +31,7 @@ import { LeadsService } from "./leads.service";
       IndustryEntity,
       UserEntity,
     ]),
+    MailModule,
   ],
   controllers: [PublicLeadsController, AdminLeadsController],
   providers: [LeadsService],

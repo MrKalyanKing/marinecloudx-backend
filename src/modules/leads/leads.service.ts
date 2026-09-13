@@ -30,6 +30,7 @@ import type {
   LeadListQueryDto,
   UpdateAdminLeadDto,
 } from "./dto/admin-lead.dto";
+import { MailService } from "../mail/mail.service";
 
 /** Public captures are always attributed here — a visitor cannot choose. */
 const PUBLIC_SOURCE_SLUG = "website-form";
@@ -44,13 +45,15 @@ export class LeadsService {
     @InjectRepository(PipelineStageEntity)
     private readonly stages: Repository<PipelineStageEntity>,
     @InjectRepository(UserEntity) private readonly usersRepo: Repository<UserEntity>,
+    @InjectRepository(ServiceEntity) private readonly servicesRepo: Repository<ServiceEntity>,
+    private readonly mail: MailService,
   ) {}
 
   // ---------------------------------------------------------------- public
 
   /** The proving slice — see docs/api.md. One transaction, server-derived lifecycle. */
   async createFromPublic(dto: CreatePublicLeadDto): Promise<{ id: string }> {
-    return this.dataSource.transaction(async (m) => {
+    const result = await this.dataSource.transaction(async (m) => {
       const source = await m.getRepository(LeadSourceEntity).findOne({
         where: { slug: PUBLIC_SOURCE_SLUG },
       });
@@ -81,7 +84,53 @@ export class LeadsService {
         source: PUBLIC_SOURCE_SLUG,
       });
 
-      return { id: lead.id };
+      return { id: lead.id, serviceId: dto.serviceId ?? null };
+    });
+
+    // ── Fire-and-forget emails after the DB transaction commits ──────────
+    // Runs outside the transaction so a mail failure cannot roll back the lead.
+    this.dispatchLeadEmails(result.id, dto, result.serviceId).catch(() => {
+      /* swallowed — mail errors are logged inside MailService */
+    });
+
+    return { id: result.id };
+  }
+
+  /** Resolves service name and dispatches both emails. Non-blocking. */
+  private async dispatchLeadEmails(
+    leadId: string,
+    dto: CreatePublicLeadDto,
+    serviceId: string | null,
+  ): Promise<void> {
+    let serviceName: string | undefined;
+    if (serviceId) {
+      const svc = await this.servicesRepo.findOne({ where: { id: serviceId } });
+      serviceName = svc?.name;
+    }
+
+    // Format budget for human-readable display in the email.
+    let budget: string | undefined;
+    if (dto.budgetMin != null || dto.budgetMax != null) {
+      const currency = dto.budgetCurrency ?? "INR";
+      if (dto.budgetMin != null && dto.budgetMax != null) {
+        budget = `${currency} ${dto.budgetMin.toLocaleString()} – ${dto.budgetMax.toLocaleString()}`;
+      } else if (dto.budgetMin != null) {
+        budget = `${currency} ${dto.budgetMin.toLocaleString()}+`;
+      } else {
+        budget = `Up to ${currency} ${dto.budgetMax!.toLocaleString()}`;
+      }
+    }
+
+    await this.mail.sendLeadEmails({
+      leadId,
+      clientName: dto.contact.firstName + (dto.contact.lastName ? ` ${dto.contact.lastName}` : ""),
+      clientEmail: dto.contact.email,
+      clientPhone: dto.contact.phone,
+      companyName: dto.companyName ?? dto.contact.company,
+      serviceName,
+      budget,
+      timeline: dto.timeline,
+      requirement: dto.requirement,
     });
   }
 
