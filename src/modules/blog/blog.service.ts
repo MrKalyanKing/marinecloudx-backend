@@ -162,6 +162,21 @@ export class BlogService {
       for (const p of shared) chosen.set(p.slug, p);
     }
 
+    if (chosen.size < limit) {
+      const exclude = [slug, ...chosen.keys()];
+      const fallback = await this.posts
+        .createQueryBuilder("post")
+        .leftJoinAndSelect("post.category", "category")
+        .leftJoinAndSelect("post.coverMedia", "coverMedia")
+        .leftJoinAndSelect("post.tags", "tags")
+        .where("post.status = :s", { s: PUBLISHED })
+        .andWhere("post.slug NOT IN (:...exclude)", { exclude })
+        .orderBy("post.publishedAt", "DESC")
+        .take(limit - chosen.size)
+        .getMany();
+      for (const p of fallback) chosen.set(p.slug, p);
+    }
+
     return [...chosen.values()].slice(0, limit).map((p) => this.toCard(p));
   }
 

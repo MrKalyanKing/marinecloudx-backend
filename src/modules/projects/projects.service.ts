@@ -13,6 +13,7 @@ export interface ProjectCardDto {
   title: string;
   slug: string;
   shortDescription: string | null;
+  status: string;
   featured: boolean;
   publishedAt: string | null;
   category: { name: string; slug: string } | null;
@@ -24,6 +25,7 @@ export interface ProjectCardDto {
 export interface ProjectDetailDto {
   title: string;
   slug: string;
+  status: string;
   shortDescription: string | null;
   fullDescription: string | null;
   liveUrl: string | null;
@@ -115,6 +117,7 @@ export class ProjectsService {
     return {
       title: p.title,
       slug: p.slug,
+      status: p.status,
       shortDescription: p.shortDescription,
       fullDescription: p.fullDescription,
       liveUrl: p.liveUrl,
@@ -158,6 +161,7 @@ export class ProjectsService {
     return {
       title: p.title,
       slug: p.slug,
+      status: p.status,
       shortDescription: p.shortDescription,
       featured: p.featured,
       publishedAt: p.publishedAt?.toISOString() ?? null,
