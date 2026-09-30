@@ -1,0 +1,131 @@
+name: Deploy Backend to AWS Lambda (S3)
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Target environment to deploy"
+        required: true
+        type: choice
+        default: "dev"
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build, Package & Deploy via S3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Determine Target Environment & Configuration
+        id: config
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET_ENV="${{ github.event.inputs.target_env }}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            TARGET_ENV="prod"
+          else
+            TARGET_ENV="dev"
+          fi
+
+          echo "Selected Target Environment: $TARGET_ENV"
+          echo "target_env=$TARGET_ENV" >> $GITHUB_OUTPUT
+
+          if [ "$TARGET_ENV" = "prod" ]; then
+            FUNCTION_NAME="${{ secrets.AWS_LAMBDA_PROD_FUNCTION_NAME }}"
+            S3_BUCKET="${{ secrets.AWS_S3_PROD_BUCKET || secrets.AWS_S3_BUCKET }}"
+          else
+            FUNCTION_NAME="${{ secrets.AWS_LAMBDA_DEV_FUNCTION_NAME }}"
+            S3_BUCKET="${{ secrets.AWS_S3_DEV_BUCKET || secrets.AWS_S3_BUCKET }}"
+          fi
+
+          if [ -z "$FUNCTION_NAME" ]; then
+            echo "::error::Lambda function name is empty! Please set AWS_LAMBDA_${TARGET_ENV^^}_FUNCTION_NAME in GitHub Secrets."
+            exit 1
+          fi
+
+          if [ -z "$S3_BUCKET" ]; then
+            echo "::error::S3 Bucket name is empty! Please set AWS_S3_BUCKET (or AWS_S3_${TARGET_ENV^^}_BUCKET) in GitHub Secrets."
+            exit 1
+          fi
+
+          echo "function_name=$FUNCTION_NAME" >> $GITHUB_OUTPUT
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install All Dependencies
+        run: npm ci
+
+      - name: TypeScript Typecheck
+        run: npm run typecheck
+
+      - name: Build & Package Lambda Zip (Linux x86_64)
+        run: npm run package:lambda
+
+      - name: Inspect Package Size
+        run: |
+          ls -lh lambda-build-linux-x64.zip
+          SIZE_BYTES=$(stat -c%s lambda-build-linux-x64.zip)
+          SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
+          echo "Zip Size: ${SIZE_MB} MB"
+          if [ "$SIZE_BYTES" -gt 52428800 ]; then
+            echo "ℹ️  Package exceeds 50MB direct API limit. S3 deployment path is strictly required and will be used."
+          fi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'ap-south-1' }}
+
+      - name: Upload to S3 & Deploy to AWS Lambda
+        run: |
+          FUNCTION_NAME="${{ steps.config.outputs.function_name }}"
+          S3_BUCKET="${{ steps.config.outputs.s3_bucket }}"
+          TARGET_ENV="${{ steps.config.outputs.target_env }}"
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          S3_KEY="lambda-deployments/${FUNCTION_NAME}/${TIMESTAMP}-${{ github.sha }}.zip"
+          S3_LATEST_KEY="lambda-deployments/${FUNCTION_NAME}/latest.zip"
+
+          echo "=================================================="
+          echo "🚀 Starting Deployment to AWS Lambda via S3"
+          echo "Environment : $TARGET_ENV"
+          echo "Function    : $FUNCTION_NAME"
+          echo "S3 Bucket   : s3://$S3_BUCKET"
+          echo "S3 Object   : $S3_KEY"
+          echo "=================================================="
+
+          echo "📦 Step 1: Uploading build package to S3..."
+          aws s3 cp lambda-build-linux-x64.zip "s3://${S3_BUCKET}/${S3_KEY}"
+          aws s3 cp lambda-build-linux-x64.zip "s3://${S3_BUCKET}/${S3_LATEST_KEY}"
+
+          echo "⚡ Step 2: Updating Lambda function code from S3..."
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --s3-bucket "$S3_BUCKET" \
+            --s3-key "$S3_KEY" \
+            --publish
+
+          echo "⏳ Step 3: Waiting for Lambda function update to complete..."
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+
+          echo "=================================================="
+          echo "✅ Lambda deployment completed successfully!"
+          echo "=================================================="

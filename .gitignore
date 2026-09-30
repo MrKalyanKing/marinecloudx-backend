@@ -1,6 +1,5 @@
 # dependencies
 /node_modules
-/.github
 /.lambda-build
 # build
 /dist
