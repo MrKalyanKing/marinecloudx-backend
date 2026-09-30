@@ -33,9 +33,15 @@ export interface AppConfig {
     bcryptCost: number;
   };
   storage: {
+    /** `s3` (production) or `imagekit` (local). Defaults to `s3`. */
+    provider: "s3" | "imagekit";
     region: string;
     bucket: string | null;
     publicUrl: string | null;
+    imagekit: {
+      publicKey: string | null;
+      urlEndpoint: string | null;
+    };
   };
   sentry: {
     dsn: string | null;
@@ -85,9 +91,17 @@ export function configuration(): AppConfig {
       bcryptCost: Number(process.env.AUTH_BCRYPT_COST ?? 12),
     },
     storage: {
+      provider:
+        (process.env.STORAGE_PROVIDER ?? "s3").trim().toLowerCase() === "imagekit"
+          ? "imagekit"
+          : "s3",
       region: process.env.AWS_REGION ?? "ap-south-1",
       bucket: process.env.AWS_S3_BUCKET || null,
       publicUrl: process.env.AWS_S3_PUBLIC_URL || null,
+      imagekit: {
+        publicKey: process.env.IMAGEKIT_PUBLIC_KEY || null,
+        urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT || null,
+      },
     },
     revalidation: {
       secret: process.env.REVALIDATE_SECRET || null,

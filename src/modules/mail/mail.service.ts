@@ -26,6 +26,15 @@ export interface LeadEmailPayload {
   leadId: string;
 }
 
+/** Payload for Careers application confirmation (applicant-facing). */
+export interface ApplicationConfirmationEmailPayload {
+  candidateName: string;
+  candidateEmail: string;
+  jobTitle: string;
+  jobCode: string;
+  applicationCode: string;
+}
+
 /**
  * Thin wrapper around Resend.
  *
@@ -83,6 +92,35 @@ export class MailService {
     });
   }
 
+  /**
+   * Applicant confirmation after a Careers application is saved.
+   * Clearly marked as a no-reply message. Fire-and-forget — never throws.
+   */
+  async sendApplicationConfirmation(payload: ApplicationConfirmationEmailPayload): Promise<void> {
+    if (!this.resend) {
+      this.logger.debug("Application confirmation skipped — RESEND_API_KEY not set.");
+      return;
+    }
+
+    try {
+      await this.resend.emails.send({
+        from: `MarineCloudX Careers <${this.from}>`,
+        to: [payload.candidateEmail],
+        replyTo: this.from,
+        subject: `We received your application for ${payload.jobTitle}`,
+        html: buildApplicationConfirmationHtml(payload),
+      });
+      this.logger.log(
+        `Application confirmation sent to ${payload.candidateEmail} (${payload.applicationCode})`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to send application confirmation to ${payload.candidateEmail}`,
+        err,
+      );
+    }
+  }
+
   // ─────────────────────────────────────────── private helpers
 
   private async sendClientConfirmation(payload: LeadEmailPayload): Promise<void> {
@@ -116,6 +154,123 @@ export class MailService {
 }
 
 // ═══════════════════════════════════════════════════════════════ HTML templates
+
+/** Applicant-facing Careers confirmation — product-company style, quiet no-reply footer. */
+function buildApplicationConfirmationHtml(p: ApplicationConfirmationEmailPayload): string {
+  const year = new Date().getFullYear();
+  const firstName = p.candidateName.trim().split(/\s+/)[0] || p.candidateName;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Application received — MarineCloudX</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f6f7f9;">
+    <tr>
+      <td align="center" style="padding:48px 16px;">
+
+        <table role="presentation" width="560" style="max-width:560px;width:100%;" cellspacing="0" cellpadding="0" border="0">
+
+          <!-- Brand -->
+          <tr>
+            <td style="padding:0 8px 28px;">
+              <p style="margin:0;font-size:15px;font-weight:650;letter-spacing:-0.2px;color:#0f172a;">MarineCloudX</p>
+              <p style="margin:4px 0 0;font-size:13px;color:#64748b;">Careers</p>
+            </td>
+          </tr>
+
+          <!-- Card -->
+          <tr>
+            <td style="background:#ffffff;border:1px solid #e8eaee;border-radius:16px;overflow:hidden;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+
+                <tr>
+                  <td style="padding:36px 40px 8px;">
+                    <p style="margin:0 0 8px;font-size:13px;font-weight:500;color:#64748b;">Application received</p>
+                    <h1 style="margin:0;font-size:24px;line-height:1.3;font-weight:650;letter-spacing:-0.4px;color:#0f172a;">
+                      Thanks for applying, ${esc(firstName)}.
+                    </h1>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:16px 40px 8px;">
+                    <p style="margin:0;font-size:15px;line-height:1.7;color:#334155;">
+                      We&rsquo;ve received your application for <strong style="color:#0f172a;">${esc(p.jobTitle)}</strong>.
+                      Our hiring team will review it carefully. If there&rsquo;s a fit, we&rsquo;ll be in touch.
+                    </p>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:24px 40px 8px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #eef0f3;border-radius:12px;background:#fafbfc;">
+                      <tr>
+                        <td style="padding:18px 20px;border-bottom:1px solid #eef0f3;">
+                          <p style="margin:0 0 4px;font-size:12px;color:#94a3b8;">Position</p>
+                          <p style="margin:0;font-size:14px;font-weight:600;color:#0f172a;">${esc(p.jobTitle)}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:18px 20px;border-bottom:1px solid #eef0f3;">
+                          <p style="margin:0 0 4px;font-size:12px;color:#94a3b8;">Job ID</p>
+                          <p style="margin:0;font-size:14px;font-weight:500;color:#0f172a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${esc(p.jobCode)}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:18px 20px;">
+                          <p style="margin:0 0 4px;font-size:12px;color:#94a3b8;">Application ID</p>
+                          <p style="margin:0;font-size:14px;font-weight:500;color:#0f172a;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">${esc(p.applicationCode)}</p>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:24px 40px 36px;">
+                    <p style="margin:0;font-size:14px;line-height:1.7;color:#64748b;">
+                      Please keep your Application ID for your records. You don&rsquo;t need to take any further action right now.
+                    </p>
+                    <p style="margin:20px 0 0;font-size:14px;line-height:1.7;color:#334155;">
+                      Best regards,<br/>
+                      <span style="font-weight:600;color:#0f172a;">MarineCloudX Careers</span>
+                    </p>
+                  </td>
+                </tr>
+
+              </table>
+            </td>
+          </tr>
+
+          <!-- Quiet footer -->
+          <tr>
+            <td style="padding:28px 8px 0;text-align:center;">
+              <p style="margin:0 0 8px;font-size:12px;line-height:1.6;color:#94a3b8;">
+                This is an automated message from a no-reply address.<br/>
+                Replies to this email are not monitored.
+              </p>
+              <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
+                <a href="https://marinecloudx.in/careers" style="color:#64748b;text-decoration:none;">Careers</a>
+                &nbsp;&middot;&nbsp;
+                <a href="https://marinecloudx.in" style="color:#64748b;text-decoration:none;">marinecloudx.in</a>
+                &nbsp;&middot;&nbsp;
+                &copy; ${year} MarineCloudX
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
 
 /** Client-facing acknowledgement — polished, on-brand. */
 function buildClientConfirmationHtml(p: LeadEmailPayload): string {

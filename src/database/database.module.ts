@@ -43,6 +43,11 @@ export class DatabaseModule {
               logging: db.logging,
               ssl: db.ssl ? { rejectUnauthorized: false } : false,
               autoLoadEntities: false,
+              extra: {
+                max: Number(process.env.DB_POOL_MAX ?? (process.env.AWS_LAMBDA_FUNCTION_NAME ? 2 : 10)),
+                connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 5000),
+                idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS ?? 10000),
+              },
             };
           },
         }),

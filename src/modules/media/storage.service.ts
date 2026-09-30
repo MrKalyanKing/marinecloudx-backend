@@ -1,77 +1,75 @@
 import { Injectable, Logger } from "@nestjs/common";
+
+import { ImageKitStorageProvider } from "./providers/imagekit.storage-provider";
+import { S3StorageProvider } from "./providers/s3.storage-provider";
 import {
-  DeleteObjectCommand,
-  PutObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+  type ObjectStorageProvider,
+  type SignedGetUrlOptions,
+  resolveStorageProviderName,
+} from "./storage.types";
 
 /**
- * Object storage — the S3-compatible backend for CMS media.
+ * Object storage facade — CMS media and private resumes.
  *
- * Deliberately abstracted: the rest of the media module never imports the AWS
- * SDK. Credentials are resolved by the SDK's default provider chain (the IAM
- * role in production), never read from env — there is no long-lived secret to
- * leak. See docs/media.md §3.
+ * Provider is selected by `STORAGE_PROVIDER`:
+ *   - `s3` (default / production): private S3 via IAM role credentials
+ *   - `imagekit` (local): ImageKit private files + signed URLs
  *
- * When `AWS_S3_BUCKET` is unset the module still builds and runs; `isConfigured`
- * reports the state and the upload route returns a 400 naming the missing
- * variable rather than a 500.
+ * The rest of the media/careers modules never import AWS or ImageKit SDKs.
+ * When the active provider is not configured, `isConfigured` reports the state
+ * and upload routes return a 400 naming the missing variable rather than a 500.
  */
 @Injectable()
 export class StorageService {
   private readonly logger = new Logger(StorageService.name);
-  private readonly region: string;
-  private readonly bucket: string | null;
-  private readonly publicBase: string | null;
-  private client: S3Client | null = null;
+  private readonly provider: ObjectStorageProvider;
 
   constructor() {
-    this.region = process.env.AWS_REGION ?? "ap-south-1";
-    this.bucket = process.env.AWS_S3_BUCKET || null;
-    this.publicBase = process.env.AWS_S3_PUBLIC_URL || null;
+    const name = resolveStorageProviderName();
+    this.provider =
+      name === "imagekit" ? new ImageKitStorageProvider() : new S3StorageProvider();
+    this.logger.log(`Object storage provider: ${this.provider.name}`);
+  }
+
+  /** Active provider name (`s3` | `imagekit`). */
+  getProviderName(): string {
+    return this.provider.name;
   }
 
   isConfigured(): boolean {
-    return Boolean(this.bucket);
+    return this.provider.isConfigured();
   }
 
   missingEnvVars(): string[] {
-    return this.isConfigured() ? [] : ["AWS_S3_BUCKET"];
+    return this.provider.missingEnvVars();
   }
 
-  private s3(): S3Client {
-    if (!this.client) this.client = new S3Client({ region: this.region });
-    return this.client;
-  }
-
-  /** Object first, then the DB row — a failed insert triggers `remove` (compensation). */
+  /** Public CMS media — CacheControl / CDN-friendly on S3; public ImageKit URL locally. */
   async put(key: string, body: Buffer, contentType: string): Promise<{ url: string }> {
-    if (!this.bucket) throw new Error("Object storage is not configured.");
-    await this.s3().send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-        CacheControl: "public, max-age=31536000, immutable",
-      }),
-    );
-    return { url: this.publicUrl(key) };
+    return this.provider.put(key, body, contentType);
+  }
+
+  /**
+   * Private object upload (resumes). No public ACL / long cache — access only
+   * via short-lived signed GET URLs.
+   */
+  async putPrivate(key: string, body: Buffer, contentType: string): Promise<void> {
+    return this.provider.putPrivate(key, body, contentType);
+  }
+
+  /**
+   * Temporary signed GET URL for private objects. Default expiry: 5 minutes.
+   * Never expose the raw key to unauthenticated clients.
+   */
+  async getSignedGetUrl(key: string, options?: SignedGetUrlOptions): Promise<string> {
+    return this.provider.getSignedGetUrl(key, options);
   }
 
   async remove(key: string): Promise<void> {
-    if (!this.bucket) return;
-    try {
-      await this.s3().send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
-    } catch (err) {
-      // Compensation, not rollback: an orphaned object is the cheaper failure.
-      this.logger.error(`Failed to delete orphaned object ${key}`, err as Error);
-    }
+    return this.provider.remove(key);
   }
 
   publicUrl(key: string): string {
-    const base =
-      this.publicBase ?? `https://${this.bucket}.s3.${this.region}.amazonaws.com`;
-    return `${base.replace(/\/+$/, "")}/${key}`;
+    return this.provider.publicUrl(key);
   }
 }

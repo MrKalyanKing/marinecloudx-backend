@@ -24,6 +24,7 @@ import { CrmModule } from "./modules/crm/crm.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { CmsModule } from "./modules/cms/cms.module";
 import { MediaModule } from "./modules/media/media.module";
+import { CareersModule } from "./modules/careers/careers.module";
 import {
   AllExceptionsFilter,
   CapabilitiesGuard,
@@ -70,6 +71,7 @@ import {
     CrmModule,
     MediaModule,
     CmsModule,
+    CareersModule,
   ],
   controllers: [AppController],
   providers: [

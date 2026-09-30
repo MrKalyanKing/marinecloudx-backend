@@ -43,6 +43,13 @@ export {
   BlogTagEntity,
 } from "./cms.entities";
 export { MediaEntity, NotificationEntity, AuditLogEntity } from "./system.entities";
+export {
+  JobEntity,
+  JobApplicationEntity,
+  ApplicationActivityEntity,
+  type EducationEntry,
+  type WorkExperienceEntry,
+} from "./careers.entities";
 
 import { RoleEntity, UserEntity } from "./auth.entities";
 import {
@@ -75,6 +82,11 @@ import {
   BlogTagEntity,
 } from "./cms.entities";
 import { MediaEntity, NotificationEntity, AuditLogEntity } from "./system.entities";
+import {
+  JobEntity,
+  JobApplicationEntity,
+  ApplicationActivityEntity,
+} from "./careers.entities";
 
 export const ALL_ENTITIES = [
   // auth
@@ -110,4 +122,8 @@ export const ALL_ENTITIES = [
   MediaEntity,
   NotificationEntity,
   AuditLogEntity,
+  // careers
+  JobEntity,
+  JobApplicationEntity,
+  ApplicationActivityEntity,
 ] as const;

@@ -1,6 +1,7 @@
 # dependencies
 /node_modules
-
+/.github
+/.lambda-build
 # build
 /dist
 *.tsbuildinfo
@@ -9,6 +10,9 @@
 .env
 .env.*
 !.env.example
+lambda.env.json
+*.env.json
+
 
 # logs
 *.log
