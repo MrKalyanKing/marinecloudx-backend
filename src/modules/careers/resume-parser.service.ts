@@ -24,8 +24,11 @@ export interface ParsedResume {
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE_RE = /(?:\+?\d{1,3}[\s-]?)?(?:\(?\d{2,4}\)?[\s-]?)?\d{3,5}[\s-]?\d{3,5}/;
-const LINKEDIN_RE = /https?:\/\/(?:www\.)?linkedin\.com\/[^\s)]+/i;
-const GITHUB_RE = /https?:\/\/(?:www\.)?github\.com\/[^\s)]+/i;
+// No `https?://` requirement: PDF/DOCX text extraction keeps only the visible
+// text of a hyperlink, and most resumes display these as bare
+// "linkedin.com/in/…" without the scheme.
+const LINKEDIN_RE = /(?:https?:\/\/)?(?:www\.)?linkedin\.com\/[^\s),]+/i;
+const GITHUB_RE = /(?:https?:\/\/)?(?:www\.)?github\.com\/[^\s),]+/i;
 const URL_RE = /https?:\/\/[^\s)]+/gi;
 
 const SKILL_CANDIDATES = [
@@ -125,16 +128,20 @@ export class ResumeParserService {
     const email = text.match(EMAIL_RE)?.[0]?.toLowerCase();
     const phoneMatch = text.match(PHONE_RE);
     const phone = phoneMatch?.[0]?.replace(/\s+/g, " ").trim();
-    const linkedinUrl = text.match(LINKEDIN_RE)?.[0];
-    const githubUrl = text.match(GITHUB_RE)?.[0];
+    const linkedinUrl = this.normalizeUrl(text.match(LINKEDIN_RE)?.[0]);
+    const githubUrl = this.normalizeUrl(text.match(GITHUB_RE)?.[0]);
 
     const urls = text.match(URL_RE) ?? [];
-    const portfolioUrl = urls.find(
+    const explicitPortfolio = urls.find(
       (u) =>
         !/linkedin\.com/i.test(u) &&
         !/github\.com/i.test(u) &&
         !/mailto:/i.test(u),
     );
+    // Falls back to a labelled bare domain ("Portfolio: srikanth.dev") when no
+    // `https://` link was found — the same gap that made LinkedIn/GitHub miss
+    // protocol-less mentions.
+    const portfolioUrl = this.normalizeUrl(explicitPortfolio ?? this.guessLabelledDomain(lines));
 
     let candidateName: string | undefined;
     for (const line of lines.slice(0, 8)) {
@@ -177,9 +184,7 @@ export class ResumeParserService {
     const workExperience = this.parseExperience(experienceBlock ?? "");
     const education = this.parseEducation(educationBlock ?? "");
 
-    const currentJobTitle =
-      workExperience[0]?.position ??
-      lines.find((l) => /developer|engineer|designer|manager|analyst|architect/i.test(l));
+    const currentJobTitle = this.cleanJobTitle(workExperience[0]?.position) ?? this.guessJobTitle(lines);
 
     return {
       candidateName,
@@ -254,12 +259,87 @@ export class ResumeParserService {
     return entries;
   }
 
+  /** Strips trailing sentence punctuation and adds a scheme if the resume text omitted it. */
+  private normalizeUrl(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim().replace(/[.,;:)\]]+$/, "");
+    if (!trimmed) return undefined;
+    return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  }
+
+  /**
+   * "Portfolio: srikanth.dev" / "Website: srikanth.dev" — a bare domain named
+   * by an explicit label, with no `https://` for {@link URL_RE} to catch.
+   */
+  private guessLabelledDomain(lines: string[]): string | undefined {
+    const labelRe = /\b(?:portfolio|website|personal\s*site|site)\s*[:\-]\s*(\S+)/i;
+    for (const line of lines.slice(0, 20)) {
+      const m = line.match(labelRe);
+      if (!m) continue;
+      const candidate = m[1].replace(/[.,;:)\]]+$/, "");
+      if (EMAIL_RE.test(candidate)) continue;
+      if (/^[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i.test(candidate)) return candidate;
+    }
+    return undefined;
+  }
+
+  /**
+   * A job-title candidate must read like a title, not a sentence lifted out of
+   * a summary or bullet: short, no terminal punctuation, no leading
+   * conjunction/preposition fragment.
+   */
+  private cleanJobTitle(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (trimmed.length < 3 || trimmed.length > 70) return undefined;
+    if (/[.!?]$/.test(trimmed)) return undefined;
+    if ((trimmed.match(/\s+/g) ?? []).length > 7) return undefined;
+    return trimmed;
+  }
+
+  private guessJobTitle(lines: string[]): string | undefined {
+    const roleRe = /\b(developer|engineer|designer|manager|analyst|architect|consultant|specialist|lead|intern)\b/i;
+    for (const line of lines) {
+      if (EMAIL_RE.test(line) || PHONE_RE.test(line) || /^https?:/i.test(line)) continue;
+      if (!roleRe.test(line)) continue;
+      // A resume experience header is often "Title | Company | Dates" on one
+      // line — try the whole line first, then just the segment before the
+      // first separator, since that segment is the part that is a title.
+      const cleaned = this.cleanJobTitle(line) ?? this.cleanJobTitle(line.split(/[|•]/)[0]);
+      if (cleaned) return cleaned;
+    }
+    return undefined;
+  }
+
   private guessLocation(lines: string[]): string | undefined {
+    // An explicit label is unambiguous and checked first — "Location: Hyderabad, India".
+    const labelRe = /\b(?:location|address|based\s*in)\s*[:\-]\s*(.+)/i;
+    for (const line of lines.slice(0, 20)) {
+      const m = line.match(labelRe);
+      const value = m?.[1]?.trim().replace(/[.,;]+$/, "");
+      if (value && value.length >= 2 && value.length <= 80) return value;
+    }
+
+    const skillSet = new Set(SKILL_CANDIDATES.map((s) => s.toLowerCase()));
     const locRe =
       /\b([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*),\s*([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*)\b/;
+
     for (const line of lines.slice(0, 12)) {
+      // Deliberately not skipping lines that also carry an email/phone — a
+      // contact header is commonly one combined line ("City, Country | phone |
+      // email"), and locRe's letters-only groups cannot match digits or "@"
+      // in the first place, so it will not mistake either for a location.
+      // A skills list reads "A, B, C, D" — more commas than a "City, State" pair has.
+      if ((line.match(/,/g) ?? []).length > 2) continue;
+
       const m = line.match(locRe);
-      if (m && !EMAIL_RE.test(line)) return `${m[1]}, ${m[2]}`;
+      if (!m) continue;
+      // Reject matches where either side is itself a known skill/technology
+      // (e.g. "Python, Django"), which is what a skills line looks like to
+      // this same regex.
+      if (skillSet.has(m[1].toLowerCase()) || skillSet.has(m[2].toLowerCase())) continue;
+
+      return `${m[1]}, ${m[2]}`;
     }
     return undefined;
   }
