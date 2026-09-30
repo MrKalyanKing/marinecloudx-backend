@@ -61,6 +61,9 @@ jobs:
             exit 1
           fi
 
+          # Strip accidental 's3://', whitespace, or trailing slashes from bucket name
+          S3_BUCKET=$(echo "$S3_BUCKET" | sed -e 's|^s3://||' -e 's|/*$||' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
           echo "function_name=$FUNCTION_NAME" >> $GITHUB_OUTPUT
           echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
 
