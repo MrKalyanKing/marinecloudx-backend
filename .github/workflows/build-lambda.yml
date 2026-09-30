@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - develop
+      - feature/develop
   workflow_dispatch:
     inputs:
       target_env:
