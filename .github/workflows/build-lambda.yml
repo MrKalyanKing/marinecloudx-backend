@@ -29,44 +29,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Determine Target Environment & Configuration
-        id: config
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TARGET_ENV="${{ github.event.inputs.target_env }}"
-          elif [ "${{ github.ref_name }}" = "main" ]; then
-            TARGET_ENV="prod"
-          else
-            TARGET_ENV="dev"
-          fi
-
-          echo "Selected Target Environment: $TARGET_ENV"
-          echo "target_env=$TARGET_ENV" >> $GITHUB_OUTPUT
-
-          if [ "$TARGET_ENV" = "prod" ]; then
-            FUNCTION_NAME="${{ secrets.AWS_LAMBDA_PROD_FUNCTION_NAME }}"
-            S3_BUCKET="${{ secrets.AWS_S3_PROD_BUCKET || secrets.AWS_S3_BUCKET }}"
-          else
-            FUNCTION_NAME="${{ secrets.AWS_LAMBDA_DEV_FUNCTION_NAME }}"
-            S3_BUCKET="${{ secrets.AWS_S3_DEV_BUCKET || secrets.AWS_S3_BUCKET }}"
-          fi
-
-          if [ -z "$FUNCTION_NAME" ]; then
-            echo "::error::Lambda function name is empty! Please set AWS_LAMBDA_${TARGET_ENV^^}_FUNCTION_NAME in GitHub Secrets."
-            exit 1
-          fi
-
-          if [ -z "$S3_BUCKET" ]; then
-            echo "::error::S3 Bucket name is empty! Please set AWS_S3_BUCKET (or AWS_S3_${TARGET_ENV^^}_BUCKET) in GitHub Secrets."
-            exit 1
-          fi
-
-          # Strip accidental 's3://', whitespace, or trailing slashes from bucket name
-          S3_BUCKET=$(echo "$S3_BUCKET" | sed -e 's|^s3://||' -e 's|/*$||' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-          echo "function_name=$FUNCTION_NAME" >> $GITHUB_OUTPUT
-          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
-
       - name: Setup Node.js 22.x
         uses: actions/setup-node@v4
         with:
@@ -89,7 +51,7 @@ jobs:
           SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
           echo "Zip Size: ${SIZE_MB} MB"
           if [ "$SIZE_BYTES" -gt 52428800 ]; then
-            echo "ℹ️  Package exceeds 50MB direct API limit. S3 deployment path is strictly required and will be used."
+            echo "ℹ️ Package exceeds 50MB direct API limit. S3 deployment path will be used."
           fi
 
       - name: Configure AWS Credentials
@@ -97,13 +59,38 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION || 'ap-south-1' }}
+          aws-region: ${{ secrets.AWS_REGION || 'ap-south-2' }}
 
       - name: Upload to S3 & Deploy to AWS Lambda
+        env:
+          TARGET_ENV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_env || (github.ref_name == 'main' && 'prod' || 'dev') }}
+          LAMBDA_DEV: ${{ secrets.AWS_LAMBDA_DEV_FUNCTION_NAME }}
+          LAMBDA_PROD: ${{ secrets.AWS_LAMBDA_PROD_FUNCTION_NAME }}
+          S3_DEV: ${{ secrets.AWS_S3_DEV_BUCKET || secrets.AWS_S3_BUCKET }}
+          S3_PROD: ${{ secrets.AWS_S3_PROD_BUCKET || secrets.AWS_S3_BUCKET }}
         run: |
-          FUNCTION_NAME="${{ steps.config.outputs.function_name }}"
-          S3_BUCKET="${{ steps.config.outputs.s3_bucket }}"
-          TARGET_ENV="${{ steps.config.outputs.target_env }}"
+          if [ "$TARGET_ENV" = "prod" ]; then
+            FUNCTION_NAME="$LAMBDA_PROD"
+            S3_BUCKET="$S3_PROD"
+          else
+            FUNCTION_NAME="$LAMBDA_DEV"
+            S3_BUCKET="$S3_DEV"
+          fi
+
+          # Strip whitespace, Windows newlines, and accidental s3:// prefix
+          FUNCTION_NAME=$(echo "$FUNCTION_NAME" | tr -d '\r\n\t ')
+          S3_BUCKET=$(echo "$S3_BUCKET" | tr -d '\r\n\t ' | sed -e 's|^s3://||' -e 's|/*$||')
+
+          if [ -z "$FUNCTION_NAME" ]; then
+            echo "::error::Lambda function name is empty! Please set AWS_LAMBDA_${TARGET_ENV^^}_FUNCTION_NAME in GitHub Secrets."
+            exit 1
+          fi
+
+          if [ -z "$S3_BUCKET" ]; then
+            echo "::error::S3 Bucket name is empty! Please set AWS_S3_BUCKET in GitHub Secrets."
+            exit 1
+          fi
+
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           S3_KEY="lambda-deployments/${FUNCTION_NAME}/${TIMESTAMP}-${{ github.sha }}.zip"
           S3_LATEST_KEY="lambda-deployments/${FUNCTION_NAME}/latest.zip"
