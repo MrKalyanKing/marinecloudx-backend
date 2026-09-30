@@ -61,6 +61,40 @@ if (!fs.existsSync(stagingNodeModules) || forceClean) {
 console.log("\n📁 Step 4: Copying dist/ into staging...");
 fs.cpSync(distDir, path.join(buildStagingDir, "dist"), { recursive: true });
 
+// 4.5. Prune non-runtime files to stay strictly below AWS Lambda 250MB uncompressed limit (262,144,000 bytes)
+console.log("\n✂️  Step 4.5: Pruning non-runtime files (.map, .d.ts, tests, docs) for AWS Lambda 250MB limit...");
+function pruneStaging(dir) {
+  if (!fs.existsSync(dir)) return;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const lower = entry.name.toLowerCase();
+      if (["test", "tests", "__tests__", "spec", "docs", "doc", "example", "examples", ".github", ".vscode"].includes(lower)) {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+      } else {
+        pruneStaging(fullPath);
+      }
+    } else {
+      const name = entry.name.toLowerCase();
+      if (
+        name.endsWith(".map") ||
+        name.endsWith(".d.ts") ||
+        name.endsWith(".d.ts.map") ||
+        name.endsWith(".md") ||
+        name.endsWith(".markdown") ||
+        name.endsWith(".txt") && !name.includes("robots") ||
+        name === "license" ||
+        name === "changelog"
+      ) {
+        fs.rmSync(fullPath, { force: true });
+      }
+    }
+  }
+}
+pruneStaging(stagingNodeModules);
+pruneStaging(path.join(buildStagingDir, "dist"));
+
 // 5. Create Zip package with explicit POSIX permissions
 console.log(`\n🗜️  Step 5: Creating zip archive: ${path.basename(zipOutputFile)} with POSIX permissions...`);
 if (fs.existsSync(zipOutputFile)) {
