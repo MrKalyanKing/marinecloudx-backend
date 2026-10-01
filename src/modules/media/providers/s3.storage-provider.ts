@@ -24,7 +24,11 @@ export class S3StorageProvider implements ObjectStorageProvider {
   private client: S3Client | null = null;
 
   constructor() {
-    this.region = process.env.AWS_REGION ?? "ap-south-1";
+    this.region =
+      process.env.AWS_S3_REGION ||
+      process.env.S3_REGION ||
+      process.env.AWS_REGION ||
+      "ap-south-1";
     this.bucket =
       process.env.AWS_S3_BUCKET ||
       process.env.AWS_S3_PROD_BUCKET ||
