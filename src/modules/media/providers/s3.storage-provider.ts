@@ -25,7 +25,12 @@ export class S3StorageProvider implements ObjectStorageProvider {
 
   constructor() {
     this.region = process.env.AWS_REGION ?? "ap-south-1";
-    this.bucket = process.env.AWS_S3_BUCKET || null;
+    this.bucket =
+      process.env.AWS_S3_BUCKET ||
+      process.env.AWS_S3_PROD_BUCKET ||
+      process.env.S3_BUCKET ||
+      process.env.AWS_BUCKET_NAME ||
+      null;
     this.publicBase = process.env.AWS_S3_PUBLIC_URL || null;
   }
 
@@ -34,7 +39,7 @@ export class S3StorageProvider implements ObjectStorageProvider {
   }
 
   missingEnvVars(): string[] {
-    return this.isConfigured() ? [] : ["AWS_S3_BUCKET"];
+    return this.isConfigured() ? [] : ["AWS_S3_BUCKET (or AWS_S3_PROD_BUCKET / S3_BUCKET)"];
   }
 
   private s3(): S3Client {

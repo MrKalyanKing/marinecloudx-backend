@@ -499,11 +499,12 @@ export class CareersService {
 
     if (file) {
       if (!this.storage.isConfigured()) {
+        const missing = this.storage.missingEnvVars().join(", ") || "AWS_S3_BUCKET";
         this.logger.error(
-          `Resume storage is not configured (provider=${this.storage.getProviderName()}). Missing: ${this.storage.missingEnvVars().join(", ") || "unknown"}`,
+          `Resume storage is not configured (provider=${this.storage.getProviderName()}). Missing: ${missing}`,
         );
         throw new BadRequestException(
-          "We couldn't upload your resume just now. Please wait a few seconds and try again.",
+          `Resume storage is not configured. Missing environment variable: ${missing}`,
         );
       }
       const safeName = this.sanitizeFileName(file.originalname);
@@ -513,11 +514,17 @@ export class CareersService {
       const key = `careers/resumes/${yyyy}/${mm}/application-${applicationId}/${safeName}`;
       try {
         await this.storage.putPrivate(key, file.buffer, file.mimetype);
-      } catch (err) {
+      } catch (err: unknown) {
         this.logger.error("Resume upload failed", err as Error);
-        throw new BadRequestException(
-          "We couldn't upload your resume just now. Please wait a few seconds and try again.",
-        );
+        const errorObj = err as Record<string, unknown> | undefined;
+        const isAccessDenied =
+          errorObj?.name === "AccessDenied" ||
+          errorObj?.Code === "AccessDenied" ||
+          String(errorObj?.message ?? "").includes("Access Denied");
+        const msg = isAccessDenied
+          ? "S3 Access Denied: Lambda IAM role lacks s3:PutObject permission on the S3 bucket."
+          : `We couldn't upload your resume (${(err as Error)?.message || "storage error"}). Please check permissions and try again.`;
+        throw new BadRequestException(msg);
       }
       resumeMeta = {
         resumeKey: key,
