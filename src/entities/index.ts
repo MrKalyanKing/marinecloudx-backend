@@ -50,6 +50,7 @@ export {
   type EducationEntry,
   type WorkExperienceEntry,
 } from "./careers.entities";
+export { CareersIdSequenceEntity } from "./careers-id-sequence.entity";
 
 import { RoleEntity, UserEntity } from "./auth.entities";
 import {
@@ -87,6 +88,7 @@ import {
   JobApplicationEntity,
   ApplicationActivityEntity,
 } from "./careers.entities";
+import { CareersIdSequenceEntity } from "./careers-id-sequence.entity";
 
 export const ALL_ENTITIES = [
   // auth
@@ -126,4 +128,6 @@ export const ALL_ENTITIES = [
   JobEntity,
   JobApplicationEntity,
   ApplicationActivityEntity,
+  CareersIdSequenceEntity,
 ] as const;
+
