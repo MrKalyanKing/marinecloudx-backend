@@ -48,6 +48,7 @@ export class InterviewScheduling1787200000000 implements MigrationInterface {
         "durationMinutes" integer NOT NULL DEFAULT 30,
         "status" "InterviewRoundStatus" NOT NULL DEFAULT 'PENDING',
         "notes" text,
+        "meetingLink" text,
         CONSTRAINT "PK_InterviewRound" PRIMARY KEY ("id"),
         CONSTRAINT "FK_InterviewRound_applicationId" FOREIGN KEY ("applicationId")
           REFERENCES "JobApplication"("id") ON DELETE CASCADE ON UPDATE CASCADE
