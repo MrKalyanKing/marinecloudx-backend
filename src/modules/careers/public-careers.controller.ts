@@ -7,6 +7,7 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UploadedFile,
   UseInterceptors,
 } from "@nestjs/common";
@@ -25,6 +26,7 @@ import { validate } from "class-validator";
 import { Public, RateLimit } from "../../common";
 import { CareersService } from "./careers.service";
 import { CreatePublicApplicationDto, JobListQueryDto } from "./dto/careers.dto";
+import { BookSlotDto } from "./dto/interview-scheduling.dto";
 
 type UploadedResume = {
   originalname: string;
@@ -92,6 +94,54 @@ export class PublicCareersController {
   ) {
     const dto = await this.coerceAndValidate(body);
     return this.careers.submitApplication(jobId, dto, file);
+  }
+
+  /* ---- Candidate Interview Scheduling ---- */
+
+  @Get("interview-scheduling/:token")
+  @ApiOperation({ summary: "Get candidate interview scheduling details by secure token" })
+  @ApiParam({ name: "token" })
+  getInterviewScheduleDetails(@Param("token") token: string) {
+    return this.careers.getPublicScheduleDetails(token);
+  }
+
+  @Get("interview-scheduling/:token/available-slots")
+  @ApiOperation({ summary: "Get available interview slots for a specific date" })
+  @ApiParam({ name: "token" })
+  getAvailableSlots(
+    @Param("token") token: string,
+    @Query("date") date: string,
+  ) {
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new BadRequestException("A valid date parameter in YYYY-MM-DD format is required.");
+    }
+    return this.careers.getPublicAvailableSlots(token, date);
+  }
+
+  @Post("interview-scheduling/:token/book")
+  @HttpCode(201)
+  @RateLimit({ limit: 10, windowMs: 10 * 60_000 })
+  @ApiOperation({ summary: "Atomically book an interview slot" })
+  @ApiParam({ name: "token" })
+  @ApiBody({ type: BookSlotDto })
+  bookInterviewSlot(
+    @Param("token") token: string,
+    @Body() dto: BookSlotDto,
+  ) {
+    return this.careers.bookSlot(token, dto);
+  }
+
+  @Get("interview-scheduling/:token/calendar.ics")
+  @ApiOperation({ summary: "Download confirmed interview calendar .ics event" })
+  @ApiParam({ name: "token" })
+  async downloadCalendarIcs(
+    @Param("token") token: string,
+    @Res({ passthrough: true }) res: any,
+  ) {
+    const icsContent = await this.careers.downloadBookingIcs(token);
+    res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="interview.ics"');
+    return icsContent;
   }
 
   private async coerceAndValidate(

@@ -1,25 +1,39 @@
 import {
   BadRequestException,
+  ConflictException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
+import { InjectDataSource, InjectRepository } from "@nestjs/typeorm";
+import { createHash, randomBytes } from "crypto";
 import type { EntityManager } from "typeorm";
-import { In, Repository } from "typeorm";
+import { DataSource, In, Repository } from "typeorm";
 
 import { buildPagination, newId, resolvePagination } from "../../common";
 import {
   ApplicationActivityType,
   ApplicationSource,
   ApplicationStatus,
+  InterviewBookingStatus,
+  InterviewRoundStatus,
+  InterviewSlotStatus,
   JobStatus,
+  SchedulingTokenStatus,
 } from "../../contracts";
 import {
   ApplicationActivityEntity,
+  InterviewAvailabilityEntity,
+  InterviewBookingEntity,
+  InterviewRoundEntity,
+  InterviewSlotEntity,
   JobApplicationEntity,
   JobEntity,
+  SchedulingTokenEntity,
   type EducationEntry,
+  type TimeWindowEntry,
   type WorkExperienceEntry,
 } from "../../entities";
 import { AuditService } from "../audit/audit.service";
@@ -33,8 +47,17 @@ import type {
   JobListQueryDto,
   UpdateJobDto,
 } from "./dto/careers.dto";
+import type {
+  BookSlotDto,
+  CancelBookingDto,
+  ConfigureAvailabilityDto,
+  CreateCandidateDto,
+  CreateInterviewRoundDto,
+  RescheduleBookingDto,
+} from "./dto/interview-scheduling.dto";
 import { ResumeExtractionService } from "./resume-extraction.service";
 import { CareersIdService } from "./careers-id.service";
+import { IcsService } from "./ics.service";
 
 const STATUS_LABEL: Record<ApplicationStatus, string> = {
   [ApplicationStatus.NEW]: "Submitted",
@@ -63,8 +86,18 @@ type UploadedResume = {
 };
 
 @Injectable()
-export class CareersService {
+export class CareersService implements OnModuleInit {
   private readonly logger = new Logger(CareersService.name);
+
+  async onModuleInit() {
+    try {
+      await this.dataSource.query(
+        `ALTER TABLE "InterviewRound" ADD COLUMN IF NOT EXISTS "meetingLink" text;`,
+      );
+    } catch (err) {
+      this.logger.warn("Could not ensure meetingLink on InterviewRound", err);
+    }
+  }
 
   constructor(
     @InjectRepository(JobEntity) private readonly jobs: Repository<JobEntity>,
@@ -72,11 +105,23 @@ export class CareersService {
     private readonly applications: Repository<JobApplicationEntity>,
     @InjectRepository(ApplicationActivityEntity)
     private readonly activities: Repository<ApplicationActivityEntity>,
-    private readonly storage: StorageService,
-    private readonly extraction: ResumeExtractionService,
-    private readonly careersIds: CareersIdService,
-    private readonly audit: AuditService,
-    private readonly mail: MailService,
+    @InjectRepository(InterviewRoundEntity)
+    private readonly interviewRounds: Repository<InterviewRoundEntity>,
+    @InjectRepository(InterviewAvailabilityEntity)
+    private readonly interviewAvailabilities: Repository<InterviewAvailabilityEntity>,
+    @InjectRepository(InterviewSlotEntity)
+    private readonly interviewSlots: Repository<InterviewSlotEntity>,
+    @InjectRepository(InterviewBookingEntity)
+    private readonly interviewBookings: Repository<InterviewBookingEntity>,
+    @InjectRepository(SchedulingTokenEntity)
+    private readonly schedulingTokens: Repository<SchedulingTokenEntity>,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @Inject(StorageService) private readonly storage: StorageService,
+    @Inject(ResumeExtractionService) private readonly extraction: ResumeExtractionService,
+    @Inject(CareersIdService) private readonly careersIds: CareersIdService,
+    @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(MailService) private readonly mail: MailService,
+    @Inject(IcsService) private readonly ics: IcsService,
   ) {}
 
   /* ------------------------------------------------------------------------ */
@@ -341,7 +386,16 @@ export class CareersService {
   async getApplicationById(id: string) {
     const app = await this.applications.findOne({
       where: { id },
-      relations: { job: true, activities: { performedBy: true } },
+      relations: {
+        job: true,
+        activities: { performedBy: true },
+        interviewRounds: {
+          availabilities: true,
+          slots: true,
+          bookings: { interviewSlot: true },
+          tokens: true,
+        },
+      },
     });
     if (!app) throw new NotFoundException("Application not found.");
     if (app.activities) {
@@ -784,6 +838,1333 @@ export class CareersService {
           ? { id: a.performedBy.id, name: a.performedBy.name }
           : null,
       })),
+      interviewRounds: (app.interviewRounds ?? [])
+        .sort(
+          (a, b) =>
+            a.roundNumber - b.roundNumber ||
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+        )
+        .map((r) => this.serializeInterviewRound(r)),
     };
   }
+
+  /* ------------------------------------------------------------------------ */
+  /* Interview Scheduling — Admin                                             */
+  /* ------------------------------------------------------------------------ */
+
+  async addCandidate(dto: CreateCandidateDto, actorUserId: string) {
+    const job = await this.jobs.findOne({ where: { id: dto.jobId } });
+    if (!job) throw new NotFoundException(`Job with ID ${dto.jobId} not found.`);
+
+    const applicationCode = await this.careersIds.nextApplicationCode(this.applications.manager);
+
+    const app = this.applications.create({
+      id: newId(),
+      jobId: job.id,
+      applicationCode,
+      candidateName: dto.candidateName.trim(),
+      email: dto.email.trim().toLowerCase(),
+      phone: dto.phone ? dto.phone.trim() : null,
+      summary: dto.notes ? dto.notes.trim() : null,
+      applicationSource: dto.applicationSource,
+      status: dto.status || ApplicationStatus.SHORTLISTED,
+      skills: [],
+      education: [],
+      workExperience: [],
+    });
+
+    await this.applications.save(app);
+
+    const sourceLabel =
+      dto.applicationSource === ApplicationSource.LINKEDIN
+        ? "LinkedIn"
+        : dto.applicationSource === ApplicationSource.REFERRAL
+        ? "Referral"
+        : dto.applicationSource === ApplicationSource.MANUAL
+        ? "Manual entry"
+        : dto.applicationSource;
+
+    await this.logActivity(this.applications.manager, {
+      applicationId: app.id,
+      action: ApplicationActivityType.APPLICATION_RECEIVED,
+      description: `Candidate added manually (${sourceLabel}) by recruitment admin`,
+      oldStatus: null,
+      newStatus: app.status,
+      performedById: actorUserId,
+      metadata: { source: dto.applicationSource, jobId: job.id, jobTitle: job.title },
+    });
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.candidate.created",
+      entityType: "job_application",
+      entityId: app.id,
+      metadata: {
+        candidateName: app.candidateName,
+        email: app.email,
+        source: dto.applicationSource,
+        jobId: job.id,
+      },
+    });
+
+    return this.getApplicationById(app.id);
+  }
+
+  async createInterviewRound(
+    applicationId: string,
+    dto: CreateInterviewRoundDto,
+    actorUserId: string,
+  ) {
+    const app = await this.applications.findOne({
+      where: { id: applicationId },
+      relations: { job: true },
+    });
+    if (!app) throw new NotFoundException("Application not found.");
+
+    const round = this.interviewRounds.create({
+      id: newId(),
+      applicationId,
+      roundNumber: dto.roundNumber ?? 1,
+      title: dto.title.trim(),
+      durationMinutes: dto.durationMinutes ?? 30,
+      status: InterviewRoundStatus.PENDING,
+      notes: dto.notes ? dto.notes.trim() : null,
+      meetingLink: dto.meetingLink ? dto.meetingLink.trim() : null,
+    });
+
+    await this.interviewRounds.save(round);
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.interview_round.created",
+      entityType: "interview_round",
+      entityId: round.id,
+      metadata: { applicationId, roundNumber: round.roundNumber, title: round.title },
+    });
+
+    return this.getInterviewRoundById(round.id);
+  }
+
+  async updateRoundMeetingLink(roundId: string, meetingLink: string, actorUserId: string) {
+    const round = await this.interviewRounds.findOne({
+      where: { id: roundId },
+      relations: { bookings: true },
+    });
+    if (!round) throw new NotFoundException("Interview round not found.");
+
+    const trimmed = meetingLink.trim();
+    round.meetingLink = trimmed;
+    await this.interviewRounds.save(round);
+
+    // If an active booking exists for this round, update its meeting link too
+    const activeBooking = (round.bookings ?? []).find(
+      (b) => b.status === InterviewBookingStatus.SCHEDULED,
+    );
+    if (activeBooking) {
+      activeBooking.meetingLink = trimmed;
+      await this.interviewBookings.save(activeBooking);
+    }
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.interview_round.meeting_link_updated",
+      entityType: "interview_round",
+      entityId: round.id,
+      metadata: { meetingLink: trimmed },
+    });
+
+    return { success: true, meetingLink: trimmed };
+  }
+
+  async updateBookingMeetingLink(bookingId: string, meetingLink: string, actorUserId: string) {
+    const booking = await this.interviewBookings.findOne({
+      where: { id: bookingId },
+      relations: { interviewRound: true },
+    });
+    if (!booking) throw new NotFoundException("Interview booking not found.");
+
+    const trimmed = meetingLink.trim();
+    booking.meetingLink = trimmed;
+    await this.interviewBookings.save(booking);
+
+    if (booking.interviewRound) {
+      booking.interviewRound.meetingLink = trimmed;
+      await this.interviewRounds.save(booking.interviewRound);
+    }
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.interview_booking.meeting_link_updated",
+      entityType: "interview_booking",
+      entityId: booking.id,
+      metadata: { meetingLink: trimmed },
+    });
+
+    return { success: true, meetingLink: trimmed };
+  }
+
+  async getInterviewRoundsForApplication(applicationId: string) {
+    const rounds = await this.interviewRounds.find({
+      where: { applicationId },
+      relations: {
+        availabilities: true,
+        slots: true,
+        bookings: { interviewSlot: true },
+        tokens: true,
+      },
+      order: { roundNumber: "ASC", createdAt: "ASC" },
+    });
+
+    return rounds.map((r) => this.serializeInterviewRound(r));
+  }
+
+  async getInterviewRoundById(id: string) {
+    const round = await this.interviewRounds.findOne({
+      where: { id },
+      relations: {
+        application: { job: true },
+        availabilities: true,
+        slots: true,
+        bookings: { interviewSlot: true },
+        tokens: true,
+      },
+    });
+    if (!round) throw new NotFoundException("Interview round not found.");
+    return this.serializeInterviewRound(round);
+  }
+
+  calculateSlots(params: {
+    startDate: string;
+    endDate: string;
+    daysOfWeek: string[];
+    timeWindows: TimeWindowEntry[];
+    durationMinutes: number;
+    bufferMinutes: number;
+    timezone: string;
+  }) {
+    const {
+      startDate,
+      endDate,
+      daysOfWeek,
+      timeWindows,
+      durationMinutes,
+      bufferMinutes,
+      timezone,
+    } = params;
+    const selectedDays = new Set(daysOfWeek.map((d) => d.toUpperCase()));
+    const now = new Date();
+
+    const [startYear, startMonth, startDay] = startDate.split("-").map(Number);
+    const [endYear, endMonth, endDay] = endDate.split("-").map(Number);
+
+    const curDate = new Date(Date.UTC(startYear, startMonth - 1, startDay, 12, 0, 0));
+    const finalDate = new Date(Date.UTC(endYear, endMonth - 1, endDay, 12, 0, 0));
+
+    const generatedSlots: Array<{
+      dateStr: string;
+      startAt: Date;
+      endAt: Date;
+      timezone: string;
+    }> = [];
+
+    while (curDate <= finalDate) {
+      const y = curDate.getUTCFullYear();
+      const m = curDate.getUTCMonth() + 1;
+      const d = curDate.getUTCDate();
+      const dateStr = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+      const noonInTz = parseZonedDateTime(y, m, d, 12, 0, timezone);
+      const weekday = new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        weekday: "short",
+      })
+        .format(noonInTz)
+        .toUpperCase();
+
+      if (selectedDays.has(weekday)) {
+        for (const window of timeWindows) {
+          const [startH, startMin] = window.startTime.split(":").map(Number);
+          const [endH, endMin] = window.endTime.split(":").map(Number);
+
+          const windowStartMinutes = startH * 60 + startMin;
+          const windowEndMinutes = endH * 60 + endMin;
+
+          let slotStartMinutes = windowStartMinutes;
+          while (slotStartMinutes + durationMinutes <= windowEndMinutes) {
+            const slotEndMinutes = slotStartMinutes + durationMinutes;
+
+            const slotStartH = Math.floor(slotStartMinutes / 60);
+            const slotStartM = slotStartMinutes % 60;
+            const slotEndH = Math.floor(slotEndMinutes / 60);
+            const slotEndM = slotEndMinutes % 60;
+
+            const startAt = parseZonedDateTime(y, m, d, slotStartH, slotStartM, timezone);
+            const endAt = parseZonedDateTime(y, m, d, slotEndH, slotEndM, timezone);
+
+            if (startAt.getTime() > now.getTime()) {
+              generatedSlots.push({
+                dateStr,
+                startAt,
+                endAt,
+                timezone,
+              });
+            }
+
+            slotStartMinutes = slotEndMinutes + bufferMinutes;
+          }
+        }
+      }
+
+      curDate.setUTCDate(curDate.getUTCDate() + 1);
+    }
+
+    return generatedSlots;
+  }
+
+  async previewSlots(roundId: string, dto: ConfigureAvailabilityDto) {
+    const round = await this.interviewRounds.findOne({ where: { id: roundId } });
+    if (!round) throw new NotFoundException("Interview round not found.");
+
+    const duration = dto.durationMinutes ?? round.durationMinutes ?? 30;
+    const buffer = dto.bufferMinutes ?? 0;
+    const tz = dto.timezone ?? "Asia/Kolkata";
+
+    const slots = this.calculateSlots({
+      startDate: dto.startDate,
+      endDate: dto.endDate,
+      daysOfWeek: dto.daysOfWeek,
+      timeWindows: dto.timeWindows,
+      durationMinutes: duration,
+      bufferMinutes: buffer,
+      timezone: tz,
+    });
+
+    const previewByDate: Record<string, number> = {};
+    for (const s of slots) {
+      previewByDate[s.dateStr] = (previewByDate[s.dateStr] ?? 0) + 1;
+    }
+
+    return {
+      totalSlots: slots.length,
+      totalDays: Object.keys(previewByDate).length,
+      durationMinutes: duration,
+      bufferMinutes: buffer,
+      timezone: tz,
+      previewByDate,
+    };
+  }
+
+  async generateSlots(
+    roundId: string,
+    dto: ConfigureAvailabilityDto,
+    actorUserId: string,
+  ) {
+    const round = await this.interviewRounds.findOne({ where: { id: roundId } });
+    if (!round) throw new NotFoundException("Interview round not found.");
+
+    const duration = dto.durationMinutes ?? round.durationMinutes ?? 30;
+    const buffer = dto.bufferMinutes ?? 0;
+    const tz = dto.timezone ?? "Asia/Kolkata";
+
+    const slotsToCreate = this.calculateSlots({
+      startDate: dto.startDate,
+      endDate: dto.endDate,
+      daysOfWeek: dto.daysOfWeek,
+      timeWindows: dto.timeWindows,
+      durationMinutes: duration,
+      bufferMinutes: buffer,
+      timezone: tz,
+    });
+
+    if (slotsToCreate.length === 0) {
+      throw new BadRequestException(
+        "No upcoming slots could be generated with the selected criteria.",
+      );
+    }
+
+    return await this.dataSource.transaction(async (manager) => {
+      const availability = manager.create(InterviewAvailabilityEntity, {
+        id: newId(),
+        interviewRoundId: roundId,
+        startDate: dto.startDate,
+        endDate: dto.endDate,
+        daysOfWeek: dto.daysOfWeek,
+        timeWindows: dto.timeWindows,
+        durationMinutes: duration,
+        bufferMinutes: buffer,
+        timezone: tz,
+        createdById: actorUserId,
+      });
+      await manager.save(availability);
+
+      const existingSlots = await manager.find(InterviewSlotEntity, {
+        where: { interviewRoundId: roundId },
+        select: { startAt: true },
+      });
+      const existingTimes = new Set(existingSlots.map((s) => s.startAt.getTime()));
+
+      const slotEntities = slotsToCreate
+        .filter((s) => !existingTimes.has(s.startAt.getTime()))
+        .map((s) =>
+          manager.create(InterviewSlotEntity, {
+            id: newId(),
+            interviewRoundId: roundId,
+            startAt: s.startAt,
+            endAt: s.endAt,
+            timezone: s.timezone,
+            status: InterviewSlotStatus.AVAILABLE,
+          }),
+        );
+
+      if (slotEntities.length > 0) {
+        await manager.save(InterviewSlotEntity, slotEntities);
+      }
+
+      await this.audit.record(
+        {
+          userId: actorUserId,
+          action: "careers.interview_availability.generated",
+          entityType: "interview_round",
+          entityId: roundId,
+          metadata: {
+            availabilityId: availability.id,
+            slotsGenerated: slotEntities.length,
+            duration,
+            buffer,
+          },
+        },
+        manager,
+      );
+
+      return {
+        availabilityId: availability.id,
+        createdSlotsCount: slotEntities.length,
+        totalSlotsAvailable: slotsToCreate.length,
+      };
+    });
+  }
+
+  async blockSlot(slotId: string, actorUserId: string) {
+    const slot = await this.interviewSlots.findOne({
+      where: { id: slotId },
+      relations: { booking: true },
+    });
+    if (!slot) throw new NotFoundException("Slot not found.");
+    if (slot.status === InterviewSlotStatus.BOOKED) {
+      throw new BadRequestException(
+        "Cannot block an already booked slot. Please cancel the booking first.",
+      );
+    }
+
+    slot.status = InterviewSlotStatus.BLOCKED;
+    await this.interviewSlots.save(slot);
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.interview_slot.blocked",
+      entityType: "interview_slot",
+      entityId: slot.id,
+    });
+
+    return slot;
+  }
+
+  async unblockSlot(slotId: string, actorUserId: string) {
+    const slot = await this.interviewSlots.findOne({ where: { id: slotId } });
+    if (!slot) throw new NotFoundException("Slot not found.");
+    if (slot.status !== InterviewSlotStatus.BLOCKED) {
+      throw new BadRequestException("Slot is not currently blocked.");
+    }
+
+    slot.status = InterviewSlotStatus.AVAILABLE;
+    await this.interviewSlots.save(slot);
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.interview_slot.unblocked",
+      entityType: "interview_slot",
+      entityId: slot.id,
+    });
+
+    return slot;
+  }
+
+  async generateSchedulingToken(roundId: string, actorUserId: string) {
+    const round = await this.interviewRounds.findOne({
+      where: { id: roundId },
+      relations: { application: true },
+    });
+    if (!round) throw new NotFoundException("Interview round not found.");
+
+    const rawToken = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000); // 14 days
+
+    const token = this.schedulingTokens.create({
+      id: newId(),
+      applicationId: round.applicationId,
+      interviewRoundId: round.id,
+      tokenHash,
+      status: SchedulingTokenStatus.ACTIVE,
+      expiresAt,
+    });
+    await this.schedulingTokens.save(token);
+
+    if (round.status === InterviewRoundStatus.PENDING) {
+      round.status = InterviewRoundStatus.INVITED;
+      await this.interviewRounds.save(round);
+    }
+
+    const schedulingUrl = `${this.publicSiteUrl}/careers/interview/schedule/${token.id}`;
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.scheduling_token.generated",
+      entityType: "scheduling_token",
+      entityId: token.id,
+      metadata: { roundId, applicationId: round.applicationId },
+    });
+
+    return {
+      tokenId: token.id,
+      rawToken,
+      schedulingUrl,
+      expiresAt: token.expiresAt,
+    };
+  }
+
+  async revokeSchedulingToken(roundId: string, actorUserId: string) {
+    const round = await this.interviewRounds.findOne({ where: { id: roundId } });
+    if (!round) throw new NotFoundException("Interview round not found.");
+
+    await this.schedulingTokens.update(
+      { interviewRoundId: roundId, status: SchedulingTokenStatus.ACTIVE },
+      { status: SchedulingTokenStatus.REVOKED },
+    );
+
+    if (round.status === InterviewRoundStatus.INVITED) {
+      round.status = InterviewRoundStatus.PENDING;
+      await this.interviewRounds.save(round);
+    }
+
+    await this.audit.record({
+      userId: actorUserId,
+      action: "careers.scheduling_token.revoked",
+      entityType: "interview_round",
+      entityId: roundId,
+      metadata: { roundId, applicationId: round.applicationId },
+    });
+
+    return { success: true, message: "Scheduling link revoked successfully." };
+  }
+
+  async regenerateSchedulingToken(roundId: string, actorUserId: string) {
+    await this.revokeSchedulingToken(roundId, actorUserId);
+    return await this.generateSchedulingToken(roundId, actorUserId);
+  }
+
+  async sendShortlistInvite(roundId: string, actorUserId: string) {
+    const round = await this.interviewRounds.findOne({
+      where: { id: roundId },
+      relations: { application: { job: true } },
+    });
+    if (!round) throw new NotFoundException("Interview round not found.");
+    const app = round.application;
+    if (!app) throw new NotFoundException("Application not found.");
+
+    const { rawToken, schedulingUrl } = await this.generateSchedulingToken(
+      roundId,
+      actorUserId,
+    );
+
+    await this.mail.sendInterviewInvitation({
+      candidateName: app.candidateName,
+      candidateEmail: app.email,
+      jobTitle: app.job?.title || "Role",
+      jobCode: app.job?.jobCode || "",
+      applicationCode: app.applicationCode,
+      roundTitle: round.title,
+      durationMinutes: round.durationMinutes,
+      schedulingUrl,
+    });
+
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    await this.schedulingTokens.update({ tokenHash }, { sentAt: new Date() });
+
+    await this.logActivity(this.applications.manager, {
+      applicationId: app.id,
+      action: ApplicationActivityType.INTERVIEW_INVITATION_SENT,
+      description: `Interview invitation sent to candidate for ${round.title}`,
+      oldStatus: null,
+      newStatus: null,
+      performedById: actorUserId,
+      metadata: { roundId, schedulingUrl },
+    });
+
+    return {
+      success: true,
+      sentTo: app.email,
+      schedulingUrl,
+    };
+  }
+
+  async cancelBooking(
+    bookingId: string,
+    dto: CancelBookingDto,
+    actorUserId: string,
+  ) {
+    return await this.dataSource.transaction(async (manager) => {
+      const booking = await manager.findOne(InterviewBookingEntity, {
+        where: { id: bookingId },
+        relations: {
+          interviewSlot: true,
+          interviewRound: true,
+          application: true,
+        },
+      });
+      if (!booking) throw new NotFoundException("Booking not found.");
+      if (booking.status === InterviewBookingStatus.CANCELLED) {
+        throw new BadRequestException("Booking is already cancelled.");
+      }
+
+      booking.status = InterviewBookingStatus.CANCELLED;
+      if (dto.reason) {
+        booking.notes = booking.notes
+          ? `${booking.notes}\n[Cancelled]: ${dto.reason}`
+          : `[Cancelled]: ${dto.reason}`;
+      }
+      await manager.save(booking);
+
+      if (booking.interviewSlot) {
+        booking.interviewSlot.status = InterviewSlotStatus.AVAILABLE;
+        await manager.save(booking.interviewSlot);
+      }
+
+      if (booking.interviewRound) {
+        booking.interviewRound.status = InterviewRoundStatus.PENDING;
+        await manager.save(booking.interviewRound);
+      }
+
+      if (booking.application) {
+        await this.logActivity(manager, {
+          applicationId: booking.applicationId,
+          action: ApplicationActivityType.INTERVIEW_CANCELLED,
+          description: `Interview booking cancelled (${dto.reason || "No reason specified"})`,
+          oldStatus: null,
+          newStatus: null,
+          performedById: actorUserId,
+        });
+      }
+
+      return booking;
+    });
+  }
+
+  async rescheduleBooking(
+    bookingId: string,
+    dto: RescheduleBookingDto,
+    actorUserId: string,
+  ) {
+    return await this.dataSource.transaction(async (manager) => {
+      const oldBooking = await manager.findOne(InterviewBookingEntity, {
+        where: { id: bookingId },
+        lock: { mode: "pessimistic_write" },
+      });
+      if (!oldBooking) throw new NotFoundException("Booking not found.");
+
+      const [interviewSlot, interviewRound, application] = await Promise.all([
+        oldBooking.interviewSlotId
+          ? manager.findOne(InterviewSlotEntity, { where: { id: oldBooking.interviewSlotId } })
+          : null,
+        manager.findOne(InterviewRoundEntity, { where: { id: oldBooking.interviewRoundId } }),
+        manager.findOne(JobApplicationEntity, { where: { id: oldBooking.applicationId } }),
+      ]);
+      oldBooking.interviewSlot = interviewSlot!;
+      oldBooking.interviewRound = interviewRound!;
+      oldBooking.application = application!;
+
+      const newSlot = await manager.findOne(InterviewSlotEntity, {
+        where: { id: dto.newSlotId, interviewRoundId: oldBooking.interviewRoundId },
+        lock: { mode: "pessimistic_write" },
+      });
+      if (!newSlot || newSlot.status !== InterviewSlotStatus.AVAILABLE) {
+        throw new ConflictException("The selected slot is no longer available.");
+      }
+
+      if (oldBooking.interviewSlot) {
+        oldBooking.interviewSlot.status = InterviewSlotStatus.AVAILABLE;
+        await manager.save(oldBooking.interviewSlot);
+      }
+      oldBooking.status = InterviewBookingStatus.RESCHEDULED;
+      await manager.save(oldBooking);
+
+      newSlot.status = InterviewSlotStatus.BOOKED;
+      await manager.save(newSlot);
+
+      const newBooking = manager.create(InterviewBookingEntity, {
+        id: newId(),
+        interviewSlotId: newSlot.id,
+        interviewRoundId: oldBooking.interviewRoundId,
+        applicationId: oldBooking.applicationId,
+        status: InterviewBookingStatus.SCHEDULED,
+        candidateTimezone: oldBooking.candidateTimezone,
+        meetingLink: oldBooking.meetingLink || this.generateMeetingLink(),
+        notes: dto.reason ? `[Rescheduled from ${oldBooking.id}]: ${dto.reason}` : null,
+        bookedAt: new Date(),
+      });
+      await manager.save(newBooking);
+
+      if (oldBooking.application) {
+        await this.logActivity(manager, {
+          applicationId: oldBooking.applicationId,
+          action: ApplicationActivityType.INTERVIEW_RESCHEDULED,
+          description: `Interview rescheduled to ${formatDateShort(newSlot.startAt, newBooking.candidateTimezone)}`,
+          oldStatus: null,
+          newStatus: null,
+          performedById: actorUserId,
+        });
+      }
+
+      return newBooking;
+    });
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* Interview Scheduling — Public Candidate                                  */
+  /* ------------------------------------------------------------------------ */
+
+  async getPublicScheduleDetails(rawToken: string) {
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    const token = await this.schedulingTokens.findOne({
+      where: [{ tokenHash }, { id: rawToken }],
+      relations: {
+        application: { job: true },
+        interviewRound: { slots: true },
+      },
+    });
+
+    if (!token) {
+      throw new NotFoundException("This scheduling link is invalid or no longer available.");
+    }
+
+    if (token.status === SchedulingTokenStatus.REVOKED) {
+      throw new BadRequestException(
+        "This scheduling link has been revoked. Please contact MarineCloudX for assistance.",
+      );
+    }
+
+    if (token.status === SchedulingTokenStatus.EXPIRED || token.expiresAt < new Date()) {
+      throw new BadRequestException(
+        "This scheduling link has expired. Please contact MarineCloudX for a new scheduling link.",
+      );
+    }
+
+    const app = token.application;
+    const round = token.interviewRound;
+    if (!app || !round) {
+      throw new NotFoundException(
+        "The requested application or interview round could not be found.",
+      );
+    }
+
+    const existingBooking = await this.interviewBookings.findOne({
+      where: {
+        applicationId: app.id,
+        interviewRoundId: round.id,
+        status: InterviewBookingStatus.SCHEDULED,
+      },
+      relations: { interviewSlot: true },
+    });
+
+    if (existingBooking && existingBooking.interviewSlot) {
+      const tz =
+        existingBooking.candidateTimezone ||
+        existingBooking.interviewSlot.timezone ||
+        "Asia/Kolkata";
+
+      const icsPayload = {
+        bookingId: existingBooking.id,
+        roundTitle: round.title,
+        candidateName: app.candidateName,
+        candidateEmail: app.email,
+        jobTitle: app.job?.title || "Role",
+        jobCode: app.job?.jobCode,
+        applicationCode: app.applicationCode,
+        startAt: existingBooking.interviewSlot.startAt,
+        endAt: existingBooking.interviewSlot.endAt,
+        timezone: tz,
+        meetingLink: existingBooking.meetingLink,
+        notes: existingBooking.notes,
+      };
+
+      const icsContent = this.ics.generateICS(icsPayload);
+      const googleCalendarUrl = this.ics.generateGoogleCalendarUrl(icsPayload);
+
+      return {
+        alreadyBooked: true,
+        booking: {
+          id: existingBooking.id,
+          date: formatDateLong(existingBooking.interviewSlot.startAt, tz),
+          time: formatTimeRange(
+            existingBooking.interviewSlot.startAt,
+            existingBooking.interviewSlot.endAt,
+            tz,
+          ),
+          timezone: tz,
+          meetingLink: existingBooking.meetingLink,
+          googleCalendarUrl,
+          icsContent,
+        },
+        candidate: {
+          name: app.candidateName,
+          email: app.email,
+          applicationCode: app.applicationCode,
+        },
+        job: {
+          title: app.job?.title || "Role",
+          department: app.job?.department,
+          location: app.job?.location,
+        },
+        round: {
+          title: round.title,
+          durationMinutes: round.durationMinutes,
+        },
+        availableDates: [],
+        timezone: tz,
+      };
+    }
+
+    const now = new Date();
+    const availableSlots = (round.slots ?? []).filter(
+      (s) =>
+        s.status === InterviewSlotStatus.AVAILABLE &&
+        new Date(s.startAt).getTime() > now.getTime(),
+    );
+
+    const tz = "Asia/Kolkata";
+    const availableDatesSet = new Set<string>();
+    for (const slot of availableSlots) {
+      const slotTz = slot.timezone || tz;
+      const dStr = formatIsoDate(slot.startAt, slotTz);
+      availableDatesSet.add(dStr);
+    }
+
+    const availableDates = Array.from(availableDatesSet).sort();
+
+    return {
+      alreadyBooked: false,
+      booking: null,
+      candidate: {
+        name: app.candidateName,
+        email: app.email,
+        applicationCode: app.applicationCode,
+      },
+      job: {
+        title: app.job?.title || "Role",
+        department: app.job?.department,
+        location: app.job?.location,
+      },
+      round: {
+        title: round.title,
+        durationMinutes: round.durationMinutes,
+      },
+      availableDates,
+      timezone: tz,
+    };
+  }
+
+  async getPublicAvailableSlots(rawToken: string, date: string) {
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    const token = await this.schedulingTokens.findOne({
+      where: [{ tokenHash }, { id: rawToken }],
+      relations: { interviewRound: true },
+    });
+
+    if (
+      !token ||
+      token.status !== SchedulingTokenStatus.ACTIVE ||
+      token.expiresAt < new Date()
+    ) {
+      throw new NotFoundException("This scheduling link is invalid or no longer active.");
+    }
+
+    const now = new Date();
+    const slots = await this.interviewSlots.find({
+      where: {
+        interviewRoundId: token.interviewRoundId,
+        status: InterviewSlotStatus.AVAILABLE,
+      },
+      order: { startAt: "ASC" },
+    });
+
+    const matchingSlots = slots
+      .filter((s) => {
+        if (new Date(s.startAt).getTime() <= now.getTime()) return false;
+        const tz = s.timezone || "Asia/Kolkata";
+        return formatIsoDate(s.startAt, tz) === date;
+      })
+      .map((s) => {
+        const tz = s.timezone || "Asia/Kolkata";
+        return {
+          id: s.id,
+          startAt: s.startAt,
+          endAt: s.endAt,
+          timezone: tz,
+          formattedTime: formatTimeShort(s.startAt, tz),
+          formattedEndTime: formatTimeShort(s.endAt, tz),
+        };
+      });
+
+    return matchingSlots;
+  }
+
+  async bookSlot(rawToken: string, dto: BookSlotDto) {
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+
+    const result = await this.dataSource.transaction(async (manager) => {
+      const token = await manager.findOne(SchedulingTokenEntity, {
+        where: [{ tokenHash }, { id: rawToken }],
+        lock: { mode: "pessimistic_write" },
+      });
+
+      if (!token) {
+        throw new NotFoundException(
+          "This scheduling link is invalid or no longer available.",
+        );
+      }
+
+      const [application, interviewRound] = await Promise.all([
+        manager.findOne(JobApplicationEntity, {
+          where: { id: token.applicationId },
+          relations: { job: true },
+        }),
+        manager.findOne(InterviewRoundEntity, {
+          where: { id: token.interviewRoundId },
+        }),
+      ]);
+
+      token.application = application!;
+      token.interviewRound = interviewRound!;
+
+      if (token.status === SchedulingTokenStatus.REVOKED) {
+        throw new BadRequestException(
+          "This scheduling link has been revoked. Please contact MarineCloudX.",
+        );
+      }
+
+      if (token.status === SchedulingTokenStatus.EXPIRED || token.expiresAt < new Date()) {
+        throw new BadRequestException(
+          "This scheduling link has expired. Please contact MarineCloudX for a new link.",
+        );
+      }
+
+      if (token.status === SchedulingTokenStatus.USED) {
+        throw new BadRequestException(
+          "This scheduling link has already been used to schedule an interview.",
+        );
+      }
+
+      const slot = await manager.findOne(InterviewSlotEntity, {
+        where: { id: dto.slotId, interviewRoundId: token.interviewRoundId },
+        lock: { mode: "pessimistic_write" },
+      });
+
+      if (!slot || slot.status !== InterviewSlotStatus.AVAILABLE) {
+        throw new ConflictException(
+          "This time slot is no longer available. Please select another available time.",
+        );
+      }
+
+      if (slot.startAt <= new Date()) {
+        throw new ConflictException(
+          "This time slot is in the past. Please select an upcoming available time.",
+        );
+      }
+
+      const existing = await manager.findOne(InterviewBookingEntity, {
+        where: {
+          applicationId: token.applicationId,
+          interviewRoundId: token.interviewRoundId,
+          status: InterviewBookingStatus.SCHEDULED,
+        },
+      });
+
+      if (existing) {
+        throw new ConflictException(
+          "You already have an active scheduled interview for this round.",
+        );
+      }
+
+      slot.status = InterviewSlotStatus.BOOKED;
+      await manager.save(slot);
+
+      const meetingLink =
+        token.interviewRound?.meetingLink ||
+        this.generateMeetingLink(token.application?.candidateName, token.interviewRound?.roundNumber);
+      const booking = manager.create(InterviewBookingEntity, {
+        id: newId(),
+        interviewSlotId: slot.id,
+        interviewRoundId: token.interviewRoundId,
+        applicationId: token.applicationId,
+        status: InterviewBookingStatus.SCHEDULED,
+        candidateTimezone: dto.timezone || slot.timezone || "Asia/Kolkata",
+        meetingLink,
+        notes: dto.notes ? dto.notes.trim() : null,
+        bookedAt: new Date(),
+      });
+      await manager.save(booking);
+
+      token.status = SchedulingTokenStatus.USED;
+      token.usedAt = new Date();
+      await manager.save(token);
+
+      const round = token.interviewRound;
+      if (round) {
+        round.status = InterviewRoundStatus.SCHEDULED;
+        await manager.save(round);
+      }
+
+      const app = token.application;
+      if (app && app.status !== ApplicationStatus.SELECTED) {
+        const oldStatus = app.status;
+        app.status = ApplicationStatus.INTERVIEW;
+        await manager.save(app);
+
+        const activity = manager.create(ApplicationActivityEntity, {
+          id: newId(),
+          applicationId: app.id,
+          action: ApplicationActivityType.INTERVIEW_SCHEDULED,
+          description: `Interview scheduled for ${round?.title || "Round"} (${formatDateShort(slot.startAt, booking.candidateTimezone)})`,
+          oldStatus: oldStatus !== ApplicationStatus.INTERVIEW ? oldStatus : null,
+          newStatus: ApplicationStatus.INTERVIEW,
+          performedById: null,
+          metadata: {
+            bookingId: booking.id,
+            slotId: slot.id,
+            roundId: round?.id,
+            startAt: slot.startAt,
+            endAt: slot.endAt,
+            timezone: booking.candidateTimezone,
+          },
+        });
+        await manager.save(activity);
+      }
+
+      return {
+        booking,
+        slot,
+        round,
+        application: app,
+      };
+    });
+
+    const tz = result.booking.candidateTimezone;
+    const formattedDate = formatDateLong(result.slot.startAt, tz);
+    const formattedTime = formatTimeRange(result.slot.startAt, result.slot.endAt, tz);
+
+    const icsPayload = {
+      bookingId: result.booking.id,
+      roundTitle: result.round?.title || "Interview",
+      candidateName: result.application?.candidateName || "Candidate",
+      candidateEmail: result.application?.email,
+      jobTitle: result.application?.job?.title || "Role",
+      jobCode: result.application?.job?.jobCode,
+      applicationCode: result.application?.applicationCode,
+      startAt: result.slot.startAt,
+      endAt: result.slot.endAt,
+      timezone: tz,
+      meetingLink: result.booking.meetingLink,
+      notes: result.booking.notes,
+    };
+
+    const icsContent = this.ics.generateICS(icsPayload);
+    const googleCalendarUrl = this.ics.generateGoogleCalendarUrl(icsPayload);
+
+    if (result.application) {
+      this.mail.sendInterviewConfirmation({
+        candidateName: result.application.candidateName,
+        candidateEmail: result.application.email,
+        jobTitle: result.application.job?.title || "Role",
+        jobCode: result.application.job?.jobCode || "",
+        applicationCode: result.application.applicationCode,
+        roundTitle: result.round?.title || "Interview",
+        durationMinutes: result.round?.durationMinutes || 30,
+        formattedDate,
+        formattedTime,
+        timezone: `${tz} (${getTimezoneAbbr(result.slot.startAt, tz)})`,
+        meetingLink: result.booking.meetingLink,
+        icsContent,
+      });
+
+      this.mail.sendInterviewAdminAlert({
+        candidateName: result.application.candidateName,
+        candidateEmail: result.application.email,
+        jobTitle: result.application.job?.title || "Role",
+        applicationCode: result.application.applicationCode,
+        roundTitle: result.round?.title || "Interview",
+        durationMinutes: result.round?.durationMinutes || 30,
+        formattedDate,
+        formattedTime,
+        timezone: tz,
+        meetingLink: result.booking.meetingLink,
+        icsContent,
+      });
+    }
+
+    return {
+      bookingId: result.booking.id,
+      applicationCode: result.application?.applicationCode,
+      candidateName: result.application?.candidateName,
+      jobTitle: result.application?.job?.title,
+      roundTitle: result.round?.title,
+      durationMinutes: result.round?.durationMinutes,
+      startAt: result.slot.startAt,
+      endAt: result.slot.endAt,
+      formattedDate,
+      formattedTime,
+      timezone: tz,
+      meetingLink: result.booking.meetingLink,
+      googleCalendarUrl,
+      icsContent,
+    };
+  }
+
+  async downloadBookingIcs(rawToken: string): Promise<string> {
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    const token = await this.schedulingTokens.findOne({
+      where: [{ tokenHash }, { id: rawToken }],
+      relations: {
+        application: { job: true },
+        interviewRound: true,
+      },
+    });
+    if (!token) throw new NotFoundException("Invalid or expired scheduling token.");
+
+    const booking = await this.interviewBookings.findOne({
+      where: {
+        applicationId: token.applicationId,
+        interviewRoundId: token.interviewRoundId,
+        status: InterviewBookingStatus.SCHEDULED,
+      },
+      relations: { interviewSlot: true },
+    });
+
+    if (!booking || !booking.interviewSlot) {
+      throw new NotFoundException("No confirmed booking found for this interview round.");
+    }
+
+    const tz = booking.candidateTimezone || booking.interviewSlot.timezone || "Asia/Kolkata";
+    return this.ics.generateICS({
+      bookingId: booking.id,
+      roundTitle: token.interviewRound?.title || "Interview",
+      candidateName: token.application?.candidateName || "Candidate",
+      candidateEmail: token.application?.email,
+      jobTitle: token.application?.job?.title || "Role",
+      jobCode: token.application?.job?.jobCode,
+      applicationCode: token.application?.applicationCode,
+      startAt: booking.interviewSlot.startAt,
+      endAt: booking.interviewSlot.endAt,
+      timezone: tz,
+      meetingLink: booking.meetingLink,
+      notes: booking.notes,
+    });
+  }
+
+  private serializeInterviewRound(r: InterviewRoundEntity) {
+    const slots = r.slots ?? [];
+    const totalSlots = slots.length;
+    const availableSlots = slots.filter((s) => s.status === InterviewSlotStatus.AVAILABLE).length;
+    const bookedSlots = slots.filter((s) => s.status === InterviewSlotStatus.BOOKED).length;
+    const blockedSlots = slots.filter((s) => s.status === InterviewSlotStatus.BLOCKED).length;
+
+    const activeToken = (r.tokens ?? [])
+      .filter(
+        (t) =>
+          t.status === SchedulingTokenStatus.ACTIVE &&
+          new Date(t.expiresAt).getTime() > Date.now(),
+      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+    const latestBooking = (r.bookings ?? [])
+      .sort((a, b) => new Date(b.bookedAt).getTime() - new Date(a.bookedAt).getTime())[0];
+
+    return {
+      id: r.id,
+      applicationId: r.applicationId,
+      roundNumber: r.roundNumber,
+      title: r.title,
+      durationMinutes: r.durationMinutes,
+      status: r.status,
+      notes: r.notes,
+      meetingLink: r.meetingLink ?? latestBooking?.meetingLink ?? null,
+      createdAt: r.createdAt,
+      stats: {
+        totalSlots,
+        availableSlots,
+        bookedSlots,
+        blockedSlots,
+      },
+      availabilities: r.availabilities ?? [],
+      slots: slots.map((s) => ({
+        id: s.id,
+        startAt: s.startAt,
+        endAt: s.endAt,
+        timezone: s.timezone,
+        status: s.status,
+        booking: s.booking
+          ? {
+              id: s.booking.id,
+              status: s.booking.status,
+              candidateTimezone: s.booking.candidateTimezone,
+              notes: s.booking.notes,
+              meetingLink: s.booking.meetingLink,
+              bookedAt: s.booking.bookedAt,
+            }
+          : null,
+      })),
+      latestBooking: latestBooking
+        ? {
+            id: latestBooking.id,
+            status: latestBooking.status,
+            bookedAt: latestBooking.bookedAt,
+            candidateTimezone: latestBooking.candidateTimezone,
+            notes: latestBooking.notes,
+            meetingLink: latestBooking.meetingLink,
+            slot: latestBooking.interviewSlot
+              ? {
+                  id: latestBooking.interviewSlot.id,
+                  startAt: latestBooking.interviewSlot.startAt,
+                  endAt: latestBooking.interviewSlot.endAt,
+                  timezone: latestBooking.interviewSlot.timezone,
+                }
+              : null,
+          }
+        : null,
+      activeToken: activeToken
+        ? {
+            id: activeToken.id,
+            schedulingUrl: `${this.publicSiteUrl}/careers/interview/schedule/${activeToken.id}`,
+            expiresAt: activeToken.expiresAt,
+            sentAt: activeToken.sentAt,
+            status: activeToken.status,
+          }
+        : null,
+    };
+  }
+
+  private generateMeetingLink(candidateName?: string, roundNumber?: number): string {
+    if (process.env.DEFAULT_GOOGLE_MEET_URL) {
+      return process.env.DEFAULT_GOOGLE_MEET_URL.trim();
+    }
+    // Instant, 100% working video room (no login, no account, zero failure)
+    const safeName = (candidateName || "Candidate")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .slice(0, 15);
+    const randPart = randomBytes(4).toString("hex");
+    return `https://meet.jit.si/MCX-Interview-${safeName}-R${roundNumber || 1}-${randPart}`;
+  }
+
+  private get publicSiteUrl(): string {
+    return (
+      process.env.PUBLIC_SITE_URL ||
+      (process.env.NODE_ENV === "production"
+        ? "https://marinecloudx.in"
+        : "http://localhost:3000")
+    ).replace(/\/+$/, "");
+  }
 }
+
+function parseZonedDateTime(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string,
+): Date {
+  const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00Z`;
+  const initialDate = new Date(dateStr);
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(initialDate);
+  const getPart = (type: string) => Number(parts.find((p) => p.type === type)?.value || 0);
+
+  const tzYear = getPart("year");
+  const tzMonth = getPart("month");
+  const tzDay = getPart("day");
+  let tzHour = getPart("hour");
+  if (tzHour === 24) tzHour = 0;
+  const tzMinute = getPart("minute");
+
+  const tzDateAsUtc = Date.UTC(tzYear, tzMonth - 1, tzDay, tzHour, tzMinute, 0);
+  const diffMs = tzDateAsUtc - initialDate.getTime();
+  return new Date(initialDate.getTime() - diffMs);
+}
+
+function formatIsoDate(date: Date, timeZone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  return `${y}-${m}-${d}`;
+}
+
+function formatTimeShort(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
+
+function formatDateLong(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(date);
+}
+
+function formatDateShort(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
+
+function formatTimeRange(startAt: Date, endAt: Date, timeZone: string): string {
+  return `${formatTimeShort(startAt, timeZone)} – ${formatTimeShort(endAt, timeZone)}`;
+}
+
+function getTimezoneAbbr(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "short",
+  }).formatToParts(date);
+  return parts.find((p) => p.type === "timeZoneName")?.value || timeZone;
+}
+

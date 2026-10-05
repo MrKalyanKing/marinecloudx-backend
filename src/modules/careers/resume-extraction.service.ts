@@ -30,7 +30,7 @@ export class ResumeExtractionService {
   private readonly ai: AiResumeExtractor;
 
   constructor(
-    private readonly parser: ResumeParserService,
+    @Inject(ResumeParserService) private readonly parser: ResumeParserService,
     @Optional() @Inject(AI_RESUME_EXTRACTOR) ai?: AiResumeExtractor,
   ) {
     this.ai = ai ?? new NullAiResumeExtractor();

@@ -47,8 +47,14 @@ export {
   JobEntity,
   JobApplicationEntity,
   ApplicationActivityEntity,
+  InterviewRoundEntity,
+  InterviewAvailabilityEntity,
+  InterviewSlotEntity,
+  InterviewBookingEntity,
+  SchedulingTokenEntity,
   type EducationEntry,
   type WorkExperienceEntry,
+  type TimeWindowEntry,
 } from "./careers.entities";
 export { CareersIdSequenceEntity } from "./careers-id-sequence.entity";
 
@@ -87,6 +93,11 @@ import {
   JobEntity,
   JobApplicationEntity,
   ApplicationActivityEntity,
+  InterviewRoundEntity,
+  InterviewAvailabilityEntity,
+  InterviewSlotEntity,
+  InterviewBookingEntity,
+  SchedulingTokenEntity,
 } from "./careers.entities";
 import { CareersIdSequenceEntity } from "./careers-id-sequence.entity";
 
@@ -129,5 +140,11 @@ export const ALL_ENTITIES = [
   JobApplicationEntity,
   ApplicationActivityEntity,
   CareersIdSequenceEntity,
+  InterviewRoundEntity,
+  InterviewAvailabilityEntity,
+  InterviewSlotEntity,
+  InterviewBookingEntity,
+  SchedulingTokenEntity,
 ] as const;
+
 

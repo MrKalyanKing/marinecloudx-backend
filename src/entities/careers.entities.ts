@@ -5,6 +5,7 @@ import {
   JoinColumn,
   ManyToOne,
   OneToMany,
+  OneToOne,
 } from "typeorm";
 
 import {
@@ -13,8 +14,13 @@ import {
   ApplicationStatus,
   EmploymentType,
   JobStatus,
+  InterviewRoundStatus,
+  InterviewSlotStatus,
+  InterviewBookingStatus,
+  SchedulingTokenStatus,
 } from "../contracts";
 import { BaseIdEntity, BaseMutableEntity } from "./_shared/primary-id";
+
 import { decimalTransformer } from "./_shared/transformers";
 import type { UserEntity } from "./auth.entities";
 
@@ -196,6 +202,9 @@ export class JobApplicationEntity extends BaseMutableEntity {
 
   @OneToMany("ApplicationActivity", "application")
   activities?: ApplicationActivityEntity[];
+
+  @OneToMany("InterviewRound", "application")
+  interviewRounds?: InterviewRoundEntity[];
 }
 
 export interface EducationEntry {
@@ -264,3 +273,213 @@ export class ApplicationActivityEntity extends BaseIdEntity {
   @Column({ type: "jsonb", nullable: true })
   metadata!: Record<string, unknown> | null;
 }
+
+export interface TimeWindowEntry {
+  startTime: string; // "HH:mm"
+  endTime: string;   // "HH:mm"
+}
+
+@Index("InterviewRound_applicationId_idx", ["applicationId"])
+@Entity({ name: "InterviewRound" })
+export class InterviewRoundEntity extends BaseMutableEntity {
+  @Column({ type: "text" })
+  applicationId!: string;
+
+  @ManyToOne("JobApplication", "interviewRounds", { onDelete: "CASCADE", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "applicationId" })
+  application?: JobApplicationEntity;
+
+  @Column({ type: "int", default: 1 })
+  roundNumber!: number;
+
+  @Column({ type: "text" })
+  title!: string;
+
+  @Column({ type: "int", default: 30 })
+  durationMinutes!: number;
+
+  @Column({
+    type: "enum",
+    enum: InterviewRoundStatus,
+    enumName: "InterviewRoundStatus",
+    default: InterviewRoundStatus.PENDING,
+  })
+  status!: InterviewRoundStatus;
+
+  @Column({ type: "text", nullable: true })
+  notes!: string | null;
+
+  @Column({ type: "text", nullable: true })
+  meetingLink!: string | null;
+
+  @OneToMany("InterviewAvailability", "interviewRound")
+  availabilities?: InterviewAvailabilityEntity[];
+
+  @OneToMany("InterviewSlot", "interviewRound")
+  slots?: InterviewSlotEntity[];
+
+  @OneToMany("InterviewBooking", "interviewRound")
+  bookings?: InterviewBookingEntity[];
+
+  @OneToMany("SchedulingToken", "interviewRound")
+  tokens?: SchedulingTokenEntity[];
+}
+
+@Index("InterviewAvailability_interviewRoundId_idx", ["interviewRoundId"])
+@Entity({ name: "InterviewAvailability" })
+export class InterviewAvailabilityEntity extends BaseMutableEntity {
+  @Column({ type: "text" })
+  interviewRoundId!: string;
+
+  @ManyToOne("InterviewRound", "availabilities", { onDelete: "CASCADE", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "interviewRoundId" })
+  interviewRound?: InterviewRoundEntity;
+
+  @Column({ type: "date" })
+  startDate!: string;
+
+  @Column({ type: "date" })
+  endDate!: string;
+
+  @Column({ type: "jsonb", default: [] })
+  daysOfWeek!: string[];
+
+  @Column({ type: "jsonb", default: [] })
+  timeWindows!: TimeWindowEntry[];
+
+  @Column({ type: "int" })
+  durationMinutes!: number;
+
+  @Column({ type: "int", default: 0 })
+  bufferMinutes!: number;
+
+  @Column({ type: "text", default: "Asia/Kolkata" })
+  timezone!: string;
+
+  @Column({ type: "text", nullable: true })
+  createdById!: string | null;
+
+  @ManyToOne("User", { onDelete: "SET NULL", onUpdate: "CASCADE", nullable: true })
+  @JoinColumn({ name: "createdById" })
+  createdBy?: UserEntity | null;
+}
+
+@Index("InterviewSlot_interviewRoundId_startAt_idx", ["interviewRoundId", "startAt"])
+@Index("InterviewSlot_status_startAt_idx", ["status", "startAt"])
+@Entity({ name: "InterviewSlot" })
+export class InterviewSlotEntity extends BaseMutableEntity {
+  @Column({ type: "text" })
+  interviewRoundId!: string;
+
+  @ManyToOne("InterviewRound", "slots", { onDelete: "CASCADE", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "interviewRoundId" })
+  interviewRound?: InterviewRoundEntity;
+
+  @Column({ type: "timestamptz", precision: 6 })
+  startAt!: Date;
+
+  @Column({ type: "timestamptz", precision: 6 })
+  endAt!: Date;
+
+  @Column({ type: "text", default: "Asia/Kolkata" })
+  timezone!: string;
+
+  @Column({
+    type: "enum",
+    enum: InterviewSlotStatus,
+    enumName: "InterviewSlotStatus",
+    default: InterviewSlotStatus.AVAILABLE,
+  })
+  status!: InterviewSlotStatus;
+
+  @OneToOne("InterviewBooking", "interviewSlot")
+  booking?: InterviewBookingEntity | null;
+}
+
+@Index("InterviewBooking_interviewSlotId_key", ["interviewSlotId"], { unique: true })
+@Index("InterviewBooking_applicationId_idx", ["applicationId"])
+@Index("InterviewBooking_interviewRoundId_idx", ["interviewRoundId"])
+@Entity({ name: "InterviewBooking" })
+export class InterviewBookingEntity extends BaseMutableEntity {
+  @Column({ type: "text" })
+  interviewSlotId!: string;
+
+  @OneToOne("InterviewSlot", "booking", { onDelete: "RESTRICT", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "interviewSlotId" })
+  interviewSlot?: InterviewSlotEntity | null;
+
+  @Column({ type: "text" })
+  interviewRoundId!: string;
+
+  @ManyToOne("InterviewRound", "bookings", { onDelete: "RESTRICT", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "interviewRoundId" })
+  interviewRound?: InterviewRoundEntity;
+
+  @Column({ type: "text" })
+  applicationId!: string;
+
+  @ManyToOne("JobApplication", { onDelete: "RESTRICT", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "applicationId" })
+  application?: JobApplicationEntity;
+
+  @Column({
+    type: "enum",
+    enum: InterviewBookingStatus,
+    enumName: "InterviewBookingStatus",
+    default: InterviewBookingStatus.SCHEDULED,
+  })
+  status!: InterviewBookingStatus;
+
+  @Column({ type: "timestamptz", precision: 6, default: () => "CURRENT_TIMESTAMP" })
+  bookedAt!: Date;
+
+  @Column({ type: "text", default: "Asia/Kolkata" })
+  candidateTimezone!: string;
+
+  @Column({ type: "text", nullable: true })
+  meetingLink!: string | null;
+
+  @Column({ type: "text", nullable: true })
+  notes!: string | null;
+}
+
+@Index("SchedulingToken_tokenHash_key", ["tokenHash"], { unique: true })
+@Index("SchedulingToken_applicationId_idx", ["applicationId"])
+@Index("SchedulingToken_interviewRoundId_idx", ["interviewRoundId"])
+@Entity({ name: "SchedulingToken" })
+export class SchedulingTokenEntity extends BaseMutableEntity {
+  @Column({ type: "text" })
+  applicationId!: string;
+
+  @ManyToOne("JobApplication", { onDelete: "CASCADE", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "applicationId" })
+  application?: JobApplicationEntity;
+
+  @Column({ type: "text" })
+  interviewRoundId!: string;
+
+  @ManyToOne("InterviewRound", "tokens", { onDelete: "CASCADE", onUpdate: "CASCADE" })
+  @JoinColumn({ name: "interviewRoundId" })
+  interviewRound?: InterviewRoundEntity;
+
+  @Column({ type: "text" })
+  tokenHash!: string;
+
+  @Column({
+    type: "enum",
+    enum: SchedulingTokenStatus,
+    enumName: "SchedulingTokenStatus",
+    default: SchedulingTokenStatus.ACTIVE,
+  })
+  status!: SchedulingTokenStatus;
+
+  @Column({ type: "timestamptz", precision: 6 })
+  expiresAt!: Date;
+
+  @Column({ type: "timestamptz", precision: 6, nullable: true })
+  usedAt!: Date | null;
+
+  @Column({ type: "timestamptz", precision: 6, nullable: true })
+  sentAt!: Date | null;
+}
+

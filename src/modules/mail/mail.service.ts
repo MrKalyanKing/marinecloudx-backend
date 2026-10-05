@@ -35,6 +35,49 @@ export interface ApplicationConfirmationEmailPayload {
   applicationCode: string;
 }
 
+/** Payload for candidate interview scheduling invitation link. */
+export interface InterviewInvitationEmailPayload {
+  candidateName: string;
+  candidateEmail: string;
+  jobTitle: string;
+  jobCode: string;
+  applicationCode: string;
+  roundTitle: string;
+  durationMinutes: number;
+  schedulingUrl: string;
+}
+
+/** Payload for candidate interview booking confirmation. */
+export interface InterviewConfirmationEmailPayload {
+  candidateName: string;
+  candidateEmail: string;
+  jobTitle: string;
+  jobCode: string;
+  applicationCode: string;
+  roundTitle: string;
+  durationMinutes: number;
+  formattedDate: string;
+  formattedTime: string;
+  timezone: string;
+  meetingLink?: string | null;
+  icsContent?: string;
+}
+
+/** Payload for admin alert when candidate books an interview. */
+export interface InterviewAdminNotificationPayload {
+  candidateName: string;
+  candidateEmail: string;
+  jobTitle: string;
+  applicationCode: string;
+  roundTitle: string;
+  durationMinutes: number;
+  formattedDate: string;
+  formattedTime: string;
+  timezone: string;
+  meetingLink?: string | null;
+  icsContent?: string;
+}
+
 /**
  * Thin wrapper around Resend.
  *
@@ -118,6 +161,108 @@ export class MailService {
         `Failed to send application confirmation to ${payload.candidateEmail}`,
         err,
       );
+    }
+  }
+
+  /**
+   * Interview invitation email with dedicated secure scheduling link.
+   */
+  async sendInterviewInvitation(payload: InterviewInvitationEmailPayload): Promise<void> {
+    if (!this.resend) {
+      this.logger.debug("Interview invitation skipped — RESEND_API_KEY not set.");
+      return;
+    }
+
+    try {
+      await this.resend.emails.send({
+        from: `MarineCloudX Careers <${this.from}>`,
+        to: [payload.candidateEmail],
+        replyTo: this.from,
+        subject: `You’ve Been Shortlisted | ${payload.jobTitle} | MarineCloudX`,
+        html: buildInterviewInvitationHtml(payload),
+      });
+      this.logger.log(
+        `Interview invitation sent to ${payload.candidateEmail} for ${payload.applicationCode}`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to send interview invitation to ${payload.candidateEmail}`,
+        err,
+      );
+    }
+  }
+
+  /**
+   * Interview confirmation email after candidate books a slot.
+   */
+  async sendInterviewConfirmation(payload: InterviewConfirmationEmailPayload): Promise<void> {
+    if (!this.resend) {
+      this.logger.debug("Interview confirmation skipped — RESEND_API_KEY not set.");
+      return;
+    }
+
+    try {
+      const attachments = payload.icsContent
+        ? [
+            {
+              filename: "interview.ics",
+              content: Buffer.from(payload.icsContent, "utf-8"),
+              contentType: "text/calendar; charset=utf-8; method=REQUEST",
+            },
+          ]
+        : undefined;
+
+      await this.resend.emails.send({
+        from: `MarineCloudX Careers <${this.from}>`,
+        to: [payload.candidateEmail],
+        replyTo: this.from,
+        subject: `Interview Scheduled | ${payload.jobTitle} | MarineCloudX`,
+        html: buildInterviewConfirmationHtml(payload),
+        attachments,
+      });
+      this.logger.log(
+        `Interview confirmation sent to ${payload.candidateEmail} (${payload.applicationCode})`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to send interview confirmation to ${payload.candidateEmail}`,
+        err,
+      );
+    }
+  }
+
+  /**
+   * Hiring team notification when a candidate confirms an interview.
+   */
+  async sendInterviewAdminAlert(payload: InterviewAdminNotificationPayload): Promise<void> {
+    if (!this.resend) {
+      this.logger.debug("Interview admin alert skipped — RESEND_API_KEY not set.");
+      return;
+    }
+
+    try {
+      const attachments = payload.icsContent
+        ? [
+            {
+              filename: "interview.ics",
+              content: Buffer.from(payload.icsContent, "utf-8"),
+              contentType: "text/calendar; charset=utf-8; method=REQUEST",
+            },
+          ]
+        : undefined;
+
+      await this.resend.emails.send({
+        from: `MarineCloudX Careers <${this.from}>`,
+        to: [this.companyEmail],
+        subject: `Interview Booked: ${payload.candidateName} — ${payload.jobTitle} (${payload.roundTitle})`,
+        html: buildInterviewAdminAlertHtml(payload),
+        attachments,
+      });
+      this.logger.log(
+        `Interview booking alert sent to ${this.companyEmail} for candidate ${payload.candidateName}`,
+      );
+    } catch (err) {
+      this.logger.error("Failed to send interview admin alert", err);
     }
   }
 
@@ -543,3 +688,447 @@ function buildStep(num: string, title: string, desc: string): string {
     </td>
   </tr>`;
 }
+
+/** Applicant-facing Interview Invitation with dedicated Calendly-style link. */
+function buildInterviewInvitationHtml(p: InterviewInvitationEmailPayload): string {
+  const firstName = p.candidateName.trim().split(/\s+/)[0] || p.candidateName;
+  const year = new Date().getFullYear();
+  // Ensure no raw localhost URL is visible in candidate emails
+  const displayUrl = p.schedulingUrl.replace(/^https?:\/\/localhost(:\d+)?/, "https://marinecloudx.in");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light" />
+  <meta name="supported-color-schemes" content="light" />
+  <title>You’ve Been Shortlisted | ${esc(p.jobTitle)} | MarineCloudX</title>
+  <style>
+    @media only screen and (max-width: 600px) {
+      .email-wrapper {
+        padding: 20px 12px !important;
+      }
+      .email-card {
+        padding: 24px 20px !important;
+        border-radius: 12px !important;
+      }
+      .btn-container {
+        width: 100% !important;
+      }
+      .btn-action {
+        display: block !important;
+        width: 100% !important;
+        text-align: center !important;
+        box-sizing: border-box !important;
+      }
+      .details-row td {
+        display: block !important;
+        width: 100% !important;
+        padding-right: 0 !important;
+      }
+      .details-row td.label {
+        padding-bottom: 2px !important;
+      }
+      .details-row td.value {
+        padding-top: 0 !important;
+        padding-bottom: 12px !important;
+      }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;color:#0f172a;line-height:1.6;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#ffffff;">
+    <tr>
+      <td align="center" class="email-wrapper" style="padding:40px 16px;">
+        <table role="presentation" width="580" style="max-width:580px;width:100%;text-align:left;" cellspacing="0" cellpadding="0" border="0">
+          
+          <!-- Top Brand & Application Update Header -->
+          <tr>
+            <td style="padding:0 0 24px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td style="vertical-align:middle;">
+                    <span style="font-size:18px;font-weight:750;letter-spacing:-0.4px;color:#0f172a;">
+                      MarineCloud<span style="color:#0284c7;">X</span>
+                    </span>
+                    <span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;color:#475569;background-color:#f1f5f9;border-radius:4px;vertical-align:middle;">
+                      Careers
+                    </span>
+                  </td>
+                  <td align="right" style="vertical-align:middle;">
+                    <span style="display:inline-block;padding:4px 10px;font-size:11px;font-weight:600;letter-spacing:0.3px;color:#0369a1;background-color:#f0f9ff;border:1px solid #bae6fd;border-radius:9999px;">
+                      Application Update
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Main Email Container -->
+          <tr>
+            <td class="email-card" style="background-color:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:36px 36px 32px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">
+              
+              <!-- Greeting / Headline -->
+              <h1 style="margin:0 0 16px;font-size:23px;font-weight:700;line-height:1.3;letter-spacing:-0.4px;color:#0f172a;">
+                Congratulations, ${esc(firstName)}!
+              </h1>
+
+              <!-- Message -->
+              <p style="margin:0 0 12px;font-size:14.5px;line-height:1.65;color:#334155;">
+                Thank you for your interest in joining MarineCloudX.
+              </p>
+              <p style="margin:0 0 12px;font-size:14.5px;line-height:1.65;color:#334155;">
+                We are pleased to inform you that your application for the <strong style="color:#0f172a;">${esc(p.jobTitle)}</strong> position has been shortlisted for the next stage of our selection process.
+              </p>
+              <p style="margin:0 0 24px;font-size:14.5px;line-height:1.65;color:#334155;">
+                Your application has successfully progressed to the next round, and we would like to invite you to schedule your interview.
+              </p>
+
+              <!-- Interview Details Box -->
+              <div style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:20px 22px;margin:0 0 28px;">
+                <p style="margin:0 0 14px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.8px;">
+                  Interview Details
+                </p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:13.5px;">
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;width:130px;vertical-align:top;">Position</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:600;vertical-align:top;">${esc(p.jobTitle)}</td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Selection Round</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:600;vertical-align:top;">${esc(p.roundTitle)}</td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Interview Format</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:500;vertical-align:top;">Online</td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Duration</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:500;vertical-align:top;">${p.durationMinutes} Minutes</td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#94a3b8;font-weight:500;vertical-align:top;">Application ID</td>
+                    <td class="value" style="padding:6px 0;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;vertical-align:top;">${esc(p.applicationCode)}</td>
+                  </tr>
+                </table>
+              </div>
+
+              <!-- Schedule Your Interview Section -->
+              <p style="margin:0 0 4px;font-size:15px;font-weight:650;color:#0f172a;">
+                Schedule Your Interview
+              </p>
+              <p style="margin:0 0 18px;font-size:14px;line-height:1.6;color:#475569;">
+                Please use the button below to select a convenient interview slot:
+              </p>
+
+              <!-- One strong Schedule Interview button -->
+              <table role="presentation" class="btn-container" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;">
+                <tr>
+                  <td align="center" style="border-radius:8px;background-color:#0f172a;">
+                    <a href="${esc(p.schedulingUrl)}" target="_blank" rel="noopener noreferrer" class="btn-action" style="display:inline-block;padding:13px 32px;font-size:14.5px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;letter-spacing:-0.1px;background-color:#0f172a;">
+                      Schedule Interview &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Fallback Link without raw localhost -->
+              <div style="margin:0 0 24px;">
+                <p style="margin:0 0 6px;font-size:12.5px;color:#64748b;line-height:1.5;">
+                  If the button doesn&#39;t work, you can use the following link:
+                </p>
+                <p style="margin:0;font-size:12.5px;line-height:1.5;word-break:break-all;">
+                  <a href="${esc(p.schedulingUrl)}" target="_blank" rel="noopener noreferrer" style="color:#0284c7;text-decoration:underline;font-weight:500;">
+                    ${esc(displayUrl)}
+                  </a>
+                </p>
+              </div>
+
+              <!-- Availability & Closing Note -->
+              <p style="margin:0 0 10px;font-size:14px;line-height:1.6;color:#475569;">
+                Please select your preferred slot at your earliest convenience. Interview slots are subject to availability.
+              </p>
+              <p style="margin:0 0 28px;font-size:14px;line-height:1.6;color:#475569;">
+                We look forward to speaking with you and learning more about your skills, experience, and interest in MarineCloudX.
+              </p>
+
+              <!-- Professional Sign-off -->
+              <div style="border-top:1px solid #f1f5f9;padding-top:20px;margin-top:8px;">
+                <p style="margin:0 0 4px;font-size:14px;color:#475569;">Best regards,</p>
+                <p style="margin:0 0 2px;font-size:14.5px;font-weight:650;color:#0f172a;">MarineCloudX Hiring Team</p>
+                <p style="margin:0 0 8px;font-size:12.5px;color:#64748b;">Technology Solutions &amp; Engineering Partner</p>
+                <p style="margin:0;font-size:12.5px;color:#64748b;">
+                  <a href="mailto:careers@marinecloudx.in" style="color:#0284c7;text-decoration:none;">careers@marinecloudx.in</a> &bull; <a href="https://marinecloudx.in" style="color:#0284c7;text-decoration:none;">marinecloudx.in</a>
+                </p>
+              </div>
+
+            </td>
+          </tr>
+
+          <!-- Subtle Footer -->
+          <tr>
+            <td style="padding:24px 8px 0;text-align:center;">
+              <p style="margin:0;font-size:11.5px;color:#94a3b8;line-height:1.6;">
+                This recruitment communication was sent to ${esc(p.candidateEmail)} regarding application ${esc(p.applicationCode)}.<br/>
+                MarineCloudX Technologies &bull; &copy; ${year} MarineCloudX. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+/** Applicant-facing Interview Confirmation. */
+function buildInterviewConfirmationHtml(p: InterviewConfirmationEmailPayload): string {
+  const firstName = p.candidateName.trim().split(/\s+/)[0] || p.candidateName;
+  const year = new Date().getFullYear();
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light" />
+  <meta name="supported-color-schemes" content="light" />
+  <title>Interview Confirmed | ${esc(p.jobTitle)} | MarineCloudX</title>
+  <style>
+    @media only screen and (max-width: 600px) {
+      .email-wrapper {
+        padding: 20px 12px !important;
+      }
+      .email-card {
+        padding: 24px 20px !important;
+        border-radius: 12px !important;
+      }
+      .btn-container {
+        width: 100% !important;
+      }
+      .btn-action {
+        display: block !important;
+        width: 100% !important;
+        text-align: center !important;
+        box-sizing: border-box !important;
+      }
+      .details-row td {
+        display: block !important;
+        width: 100% !important;
+        padding-right: 0 !important;
+      }
+      .details-row td.label {
+        padding-bottom: 2px !important;
+      }
+      .details-row td.value {
+        padding-top: 0 !important;
+        padding-bottom: 12px !important;
+      }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;color:#0f172a;line-height:1.6;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#ffffff;">
+    <tr>
+      <td align="center" class="email-wrapper" style="padding:40px 16px;">
+        <table role="presentation" width="580" style="max-width:580px;width:100%;text-align:left;" cellspacing="0" cellpadding="0" border="0">
+          
+          <!-- Top Brand Header -->
+          <tr>
+            <td style="padding:0 0 24px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td style="vertical-align:middle;">
+                    <span style="font-size:18px;font-weight:750;letter-spacing:-0.4px;color:#0f172a;">
+                      MarineCloud<span style="color:#0284c7;">X</span>
+                    </span>
+                    <span style="display:inline-block;margin-left:8px;padding:2px 8px;font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;color:#475569;background-color:#f1f5f9;border-radius:4px;vertical-align:middle;">
+                      Careers
+                    </span>
+                  </td>
+                  <td align="right" style="vertical-align:middle;">
+                    <span style="display:inline-block;padding:4px 10px;font-size:11px;font-weight:600;letter-spacing:0.3px;color:#047857;background-color:#ecfdf5;border:1px solid #a7f3d0;border-radius:9999px;">
+                      &#10003; Interview Scheduled
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Main Email Container -->
+          <tr>
+            <td class="email-card" style="background-color:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:36px 36px 32px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">
+              
+              <h1 style="margin:0 0 16px;font-size:23px;font-weight:700;line-height:1.3;letter-spacing:-0.4px;color:#0f172a;">
+                Interview Confirmed, ${esc(firstName)}!
+              </h1>
+
+              <p style="margin:0 0 24px;font-size:14.5px;line-height:1.65;color:#334155;">
+                Your interview for <strong style="color:#0f172a;">${esc(p.jobTitle)}</strong> has been confirmed. Below are your scheduled appointment details:
+              </p>
+
+              <!-- Interview Details Box -->
+              <div style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:20px 22px;margin:0 0 28px;">
+                <p style="margin:0 0 14px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.8px;">
+                  Appointment Details
+                </p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:13.5px;">
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;width:130px;vertical-align:top;">Position</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:600;vertical-align:top;">${esc(p.jobTitle)}</td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Selection Round</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:600;vertical-align:top;">${esc(p.roundTitle)}</td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Date &amp; Time</td>
+                    <td class="value" style="padding:6px 0;color:#0284c7;font-weight:650;vertical-align:top;">
+                      ${esc(p.formattedDate)} &bull; ${esc(p.formattedTime)}
+                      <span style="font-size:12px;color:#64748b;font-weight:normal;">(${esc(p.timezone)})</span>
+                    </td>
+                  </tr>
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Duration &amp; Mode</td>
+                    <td class="value" style="padding:6px 0;color:#0f172a;font-weight:500;vertical-align:top;">${p.durationMinutes} Minutes &bull; Online Video Call</td>
+                  </tr>
+                  ${
+                    p.meetingLink
+                      ? `<tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#64748b;font-weight:500;vertical-align:top;">Google Meet</td>
+                    <td class="value" style="padding:6px 0;vertical-align:top;">
+                      <a href="${esc(p.meetingLink)}" target="_blank" rel="noopener noreferrer" style="color:#0284c7;text-decoration:underline;font-weight:500;word-break:break-all;">${esc(p.meetingLink)}</a>
+                    </td>
+                  </tr>`
+                      : ""
+                  }
+                  <tr class="details-row">
+                    <td class="label" style="padding:6px 12px 6px 0;color:#94a3b8;font-weight:500;vertical-align:top;">Application ID</td>
+                    <td class="value" style="padding:6px 0;color:#64748b;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;vertical-align:top;">${esc(p.applicationCode)}</td>
+                  </tr>
+                </table>
+              </div>
+
+              ${
+                p.meetingLink
+                  ? `<!-- Join Google Meet CTA -->
+              <table role="presentation" class="btn-container" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 24px;">
+                <tr>
+                  <td align="center" style="border-radius:8px;background-color:#0f172a;">
+                    <a href="${esc(p.meetingLink)}" target="_blank" rel="noopener noreferrer" class="btn-action" style="display:inline-block;padding:13px 32px;font-size:14.5px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;letter-spacing:-0.1px;background-color:#0f172a;">
+                      &#127916; Join Google Meet &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>`
+                  : ""
+              }
+
+              <p style="margin:0 0 24px;font-size:14px;line-height:1.6;color:#475569;">
+                A calendar invitation (.ics) is attached to this email. Please ensure you are in a quiet environment with a reliable internet connection at the scheduled time.
+              </p>
+
+              <!-- Professional Sign-off -->
+              <div style="border-top:1px solid #f1f5f9;padding-top:20px;margin-top:8px;">
+                <p style="margin:0 0 4px;font-size:14px;color:#475569;">Best regards,</p>
+                <p style="margin:0 0 2px;font-size:14.5px;font-weight:650;color:#0f172a;">MarineCloudX Hiring Team</p>
+                <p style="margin:0 0 8px;font-size:12.5px;color:#64748b;">Technology Solutions &amp; Engineering Partner</p>
+                <p style="margin:0;font-size:12.5px;color:#64748b;">
+                  <a href="mailto:careers@marinecloudx.in" style="color:#0284c7;text-decoration:none;">careers@marinecloudx.in</a> &bull; <a href="https://marinecloudx.in" style="color:#0284c7;text-decoration:none;">marinecloudx.in</a>
+                </p>
+              </div>
+
+            </td>
+          </tr>
+
+          <!-- Subtle Footer -->
+          <tr>
+            <td style="padding:24px 8px 0;text-align:center;">
+              <p style="margin:0;font-size:11.5px;color:#94a3b8;line-height:1.6;">
+                This recruitment notification was sent to ${esc(p.candidateEmail)} regarding application ${esc(p.applicationCode)}.<br/>
+                MarineCloudX Technologies &bull; &copy; ${year} MarineCloudX. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+/** Hiring team alert email when a candidate schedules an interview. */
+function buildInterviewAdminAlertHtml(p: InterviewAdminNotificationPayload): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Candidate Interview Booked</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f6f7f9;">
+    <tr>
+      <td align="center" style="padding:48px 16px;">
+        <table role="presentation" width="560" style="max-width:560px;width:100%;" cellspacing="0" cellpadding="0" border="0">
+          <tr>
+            <td style="padding:0 8px 24px;">
+              <p style="margin:0;font-size:15px;font-weight:650;letter-spacing:-0.2px;color:#0f172a;">MarineCloudX Hiring Alert</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#ffffff;border:1px solid #e8eaee;border-radius:16px;padding:32px 36px;">
+              <h2 style="margin:0 0 12px;font-size:20px;font-weight:650;color:#0f172a;">
+                Candidate Booked an Interview
+              </h2>
+              <p style="margin:0 0 20px;font-size:14px;color:#475569;">
+                <strong>${esc(p.candidateName)}</strong> has scheduled their <strong>${esc(p.roundTitle)}</strong> for <strong>${esc(p.jobTitle)}</strong>.
+              </p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #eef0f3;border-radius:12px;background:#fafbfc;margin-bottom:24px;">
+                <tr>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;color:#64748b;width:140px;">Candidate</td>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;font-weight:600;color:#0f172a;">${esc(p.candidateName)} (${esc(p.candidateEmail)})</td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;color:#64748b;">Scheduled Time</td>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;font-weight:600;color:#0d9488;">${esc(p.formattedDate)} at ${esc(p.formattedTime)} (${esc(p.timezone)})</td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;color:#64748b;">Round</td>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;font-weight:500;color:#0f172a;">${esc(p.roundTitle)} (${p.durationMinutes} min)</td>
+                </tr>
+                ${
+                  p.meetingLink
+                    ? `<tr>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;color:#64748b;">Google Meet</td>
+                  <td style="padding:12px 16px;border-bottom:1px solid #eef0f3;font-size:13px;font-weight:600;"><a href="${esc(p.meetingLink)}" target="_blank" style="color:#0d9488;text-decoration:none;">${esc(p.meetingLink)}</a></td>
+                </tr>`
+                    : ""
+                }
+                <tr>
+                  <td style="padding:12px 16px;font-size:13px;color:#64748b;">Application ID</td>
+                  <td style="padding:12px 16px;font-size:13px;font-family:monospace;color:#0f172a;">${esc(p.applicationCode)}</td>
+                </tr>
+              </table>
+              <div style="text-align:center;">
+                <a href="https://admin.marinecloudx.in/careers/applications" style="display:inline-block;padding:12px 28px;background-color:#0f172a;color:#ffffff;text-decoration:none;border-radius:10px;font-size:13px;font-weight:600;">
+                  Open Admin Dashboard &rarr;
+                </a>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
