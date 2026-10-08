@@ -40,8 +40,21 @@ export class CrmService {
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
-  /** Every configurable value the CRM UI needs, so nothing is hardcoded. */
+  private configCache: { data: unknown; expiresAt: number } | null = null;
+
+  /** Every configurable value the CRM UI needs, so nothing is hardcoded. Cached in memory for 30s. */
   async config() {
+    const now = Date.now();
+    if (this.configCache && this.configCache.expiresAt > now) {
+      return this.configCache.data as {
+        pipelineStages: PipelineStageEntity[];
+        sources: LeadSourceEntity[];
+        industries: IndustryEntity[];
+        services: ServiceEntity[];
+        users: { id: string; name: string; roleSlug: string }[];
+      };
+    }
+
     const [pipelineStages, sources, industries, services, users] = await Promise.all([
       this.stages.find({ where: { isActive: true }, order: { order: "ASC" } }),
       this.sources.find({ where: { isActive: true }, order: { order: "ASC" } }),
@@ -55,13 +68,16 @@ export class CrmService {
         .getMany(),
     ]);
 
-    return {
+    const result = {
       pipelineStages,
       sources,
       industries,
       services,
       users: users.map((u) => ({ id: u.id, name: u.name, roleSlug: u.role!.slug })),
     };
+
+    this.configCache = { data: result, expiresAt: now + 30_000 };
+    return result;
   }
 
   async dashboard() {

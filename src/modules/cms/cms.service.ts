@@ -42,13 +42,23 @@ export class CmsService {
     return getResource(key);
   }
 
-  summary() {
-    return Promise.all(
+  private summaryCache: { data: { key: string; count: number }[]; expiresAt: number } | null = null;
+
+  async summary() {
+    const now = Date.now();
+    if (this.summaryCache && this.summaryCache.expiresAt > now) {
+      return this.summaryCache.data;
+    }
+
+    const data = await Promise.all(
       Object.values(CMS_RESOURCES).map(async (r) => ({
         key: r.key,
         count: await this.dataSource.getRepository(r.entity).count(),
       })),
     );
+
+    this.summaryCache = { data, expiresAt: now + 15_000 };
+    return data;
   }
 
   /** id/title pairs for relation dropdowns. */

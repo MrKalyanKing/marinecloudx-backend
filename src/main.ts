@@ -34,7 +34,7 @@ async function bootstrap(): Promise<void> {
     isDbConnected = false;
   }
 
-  await app.listen(port);
+  await app.listen(port, "0.0.0.0");
 
   // Startup Console Output
   console.log("");

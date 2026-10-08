@@ -19,6 +19,13 @@ const LOGIN_WINDOW_MS = 10 * 60_000;
 /** Same generic failure for every path — never reveals which check failed. */
 const INVALID = "Invalid email or password.";
 
+interface CachedResolution {
+  user: AuthenticatedUser | null;
+  expiresAt: number;
+}
+
+const RESOLVE_CACHE_TTL_MS = 10_000;
+
 @Injectable()
 export class AuthService {
   /**
@@ -28,6 +35,7 @@ export class AuthService {
    * limitation as the rest of the rate limiting (per-process).
    */
   private readonly failures = new Map<string, Attempt>();
+  private readonly resolveCache = new Map<string, CachedResolution>();
 
   constructor(
     @InjectRepository(UserEntity)
@@ -73,9 +81,16 @@ export class AuthService {
    * Resolves a token to the caller's current identity + capabilities.
    *
    * A valid token is not enough: the user must still exist and still be ACTIVE.
-   * Role and capabilities are read fresh here on every request.
+   * Cached in memory for a short window (10s) to eliminate duplicate DB queries
+   * during page transitions and parallel API requests.
    */
   async resolve(token: string): Promise<AuthenticatedUser | null> {
+    const now = Date.now();
+    const cached = this.resolveCache.get(token);
+    if (cached && cached.expiresAt > now) {
+      return cached.user;
+    }
+
     const userId = this.tokens.verify(token);
     if (!userId) return null;
 
@@ -91,18 +106,31 @@ export class AuthService {
       },
     });
 
-    if (!user || user.status !== UserStatus.ACTIVE || !user.role) {
-      return null;
+    const authenticatedUser: AuthenticatedUser | null =
+      !user || user.status !== UserStatus.ACTIVE || !user.role
+        ? null
+        : {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            roleId: user.role.id,
+            roleSlug: user.role.slug,
+            capabilities: capabilitiesForRole(user.role.slug),
+          };
+
+    // Keep cache bounded
+    if (this.resolveCache.size > 500) {
+      for (const [k, v] of this.resolveCache.entries()) {
+        if (v.expiresAt <= now) this.resolveCache.delete(k);
+      }
     }
 
-    return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      roleId: user.role.id,
-      roleSlug: user.role.slug,
-      capabilities: capabilitiesForRole(user.role.slug),
-    };
+    this.resolveCache.set(token, {
+      user: authenticatedUser,
+      expiresAt: now + RESOLVE_CACHE_TTL_MS,
+    });
+
+    return authenticatedUser;
   }
 
   private isThrottled(key: string): boolean {
